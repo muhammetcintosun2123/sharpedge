@@ -62,9 +62,7 @@ def odds_series(fid: int):
     if USE_LIVE:
         try:
             from txline import live_feed as F
-            if fid not in _live["series"]:
-                _live["series"][fid] = F.odds_series(fid)
-            return _live["series"][fid]
+            return F.odds_series(fid)      # always fresh, so the live tail sees new updates
         except Exception:
             pass
     for f in _data["fixtures"]:
@@ -120,25 +118,52 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode())
             self.wfile.flush()
 
-        ser = odds_series(fid)
         det = SharpDetector(fixture_id=fid, match=name)
-        open_p = implied_probs(ser[0]["odds"]) if ser else {}
         try:
-            emit("meta", {"points": len(ser), "fixture": fid, "name": name})
+            ser = odds_series(fid)          # real history (live fetch if --live, else cache)
+            if not ser:
+                emit("done", {}); return
+            open_p = implied_probs(ser[0]["odds"])
+            mode = "LIVE feed" if USE_LIVE else "cached real odds"
+            emit("meta", {"points": len(ser), "fixture": fid, "name": name, "mode": mode})
             drift = {"1": 0.0, "X": 0.0, "2": 0.0}
-            for i, pt in enumerate(ser):
+
+            def push(pt, i, n):
                 p = implied_probs(pt["odds"])
                 ts = pt.get("ts", i * 60)
                 sigs = [{"sel": s.selection, "z": round(s.z, 1), "dp": round(s.delta_p, 4),
-                         "kind": s.kind, "odds": s.odds_after}
-                        for s in det.update(pt["odds"], ts=ts)]
-                drift = {k: round((p.get(k, 0) - open_p.get(k, 0)) * 100, 1) for k in ("1", "X", "2")}
-                emit("tick", {"i": i, "n": len(ser),
+                         "kind": s.kind, "odds": s.odds_after} for s in det.update(pt["odds"], ts=ts)]
+                d = {k: round((p.get(k, 0) - open_p.get(k, 0)) * 100, 1) for k in ("1", "X", "2")}
+                emit("tick", {"i": i, "n": n, "ts": ts,
                               "odds": {k: round(v, 2) for k, v in pt["odds"].items()},
                               "fair": {k: round(p.get(k, 0), 4) for k in ("1", "X", "2")},
-                              "drift": drift, "signals": sigs})
+                              "drift": d, "signals": sigs})
+                return d
+
+            # 1) fill the screen with the recent REAL history (fast)
+            for i, pt in enumerate(ser):
+                drift = push(pt, i, len(ser))
                 time.sleep(PACE_S)
-            emit("done", {"drift": drift})
+
+            if not USE_LIVE:
+                emit("done", {"drift": drift})
+                return
+
+            # 2) LIVE TAIL: keep polling the real feed; emit genuinely new updates as they land
+            emit("livetail", {"since": len(ser)})
+            sent = len(ser)
+            while True:
+                for _ in range(6):            # ~6s between polls, heartbeat each second
+                    emit("beat", {"now": time.time(), "sent": sent})
+                    time.sleep(1)
+                try:
+                    fresh = odds_series(fid)
+                except Exception:
+                    continue
+                if len(fresh) > sent:
+                    for j in range(sent, len(fresh)):
+                        drift = push(fresh[j], j, len(fresh))
+                    sent = len(fresh)
         except (BrokenPipeError, ConnectionResetError):
             return
 
@@ -228,7 +253,9 @@ $("go").onclick=()=>{
     t.signals.forEach(s=>{const d=document.createElement("div");d.className="sig";
       d.innerHTML=`🚨 <b>${s.kind}</b> '${s.sel}' Δ${s.dp>=0?'+':''}${s.dp} (${s.z>=0?'+':''}${s.z}σ) @ ${s.odds}`;$("feed").prepend(d);});
   });
-  es.addEventListener("done",()=>{log("■ stream complete — real market history replayed");es.close();});
+  es.addEventListener("livetail",()=>{log("🔴 now LIVE — polling the real TxLINE feed for new updates…");});
+  es.addEventListener("beat",e=>{const b=JSON.parse(e.data);$("clock").textContent="🔴 LIVE · watching feed · "+new Date(b.now*1000).toLocaleTimeString();});
+  es.addEventListener("done",()=>{log("■ replay complete (cached mode — run with --live for the real-time tail)");es.close();});
   es.onerror=()=>{log("stream ended");};
 };
 function log(t){const d=document.createElement("div");d.className="log";d.textContent=t;$("feed").prepend(d);}
