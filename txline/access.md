@@ -31,3 +31,14 @@ SUBSCRIPTION_PRICE_TOKEN=1). The free World Cup tier is meant to be done through
   (A) user connects Phantom on txline docs/app → Subscribe Free Tier → we read the activated tokens; or
   (B) ask TxODDS Discord/Telegram for a devnet hackathon test token (they offer real-time support).
 Until then the agent runs on the schema-faithful simulator (brief allows "live OR simulated").
+
+## MAINNET (live World Cup free tier) — VERIFIED 2026-07-08
+Program: `9ExbZjAapQww1vfcisDmrngPinHTEfpjYRWMunJgcKaA` (txoracle v1.5.5)
+API: `https://txline.txodds.com` — guest JWT `POST /auth/guest/start` returns 200.
+TXLINE mint (Token-2022): `Zhw9TVKp68a1QrftncMSd6ELXKDtpVMNuMGr1jNwdeL`
+Free tiers (price 0 tokens, verified vs on-chain PricingMatrix): service_level **1** (World Cup,
+60s delay) and **12** (real-time). So subscribe needs only ~0.003 SOL (fees+rent), NO TXLINE tokens.
+Accounts (from TxODDS docs example): pricing_matrix PDA["pricing_matrix"], token_treasury_pda
+PDA["token_treasury_v2"], user/treasury ATAs via Token-2022. Client: `txline/live_mainnet.py`.
+`--simulate` confirmed account derivations resolve to the real on-chain treasury vault.
+Blocker: fund the generated keypair with ~0.01 SOL, then `--subscribe` → activate → live reads.

@@ -6,3 +6,5 @@ __pycache__/
 txline_tokens.json
 *.session
 secrets/
+txline/mainnet_key.json
+txline/mainnet_token.json
