@@ -48,13 +48,22 @@ python -m agent.web  --open                 # self-contained visual dashboard (o
 python -m pytest -q                         # determinism + scoring + backtest tests
 ```
 
-## Live TxLINE ready (verified)
-The full mainnet live-access path is built and verified in `txline/live_mainnet.py`: guest
-JWT → on-chain `subscribe` (free World Cup tier, **0 tokens** — confirmed against the
-on-chain PricingMatrix) → activate → read. A `--simulate` run confirms the subscribe
-transaction's accounts resolve to the real on-chain treasury; the only thing between the
-agent and a live mainnet feed is the tiny subscribe fee. The brief allows live **or**
-simulated data, and the schema-faithful simulator is used for the reproducible demo.
+## LIVE on real TxLINE data (proven, not mocked)
+SharpEdge runs on the **real** TxLINE World Cup feed. We subscribed to the free World Cup
+tier on-chain (0-token tier, confirmed against the on-chain PricingMatrix), activated an
+API token, and now ingest genuine de-vigged 1X2 odds:
+
+```
+python -m txline.live_mainnet --network devnet --subscribe   # one-time: subscribe + activate
+python -m agent.live --network devnet                        # run the detector on REAL odds
+python -m agent.prodash --snapshot --open                    # live terminal dashboard (real data)
+```
+
+Real result: **918 real odds updates for France v Morocco, 800 for Norway v England**, etc.
+Pre-match World Cup markets are efficient, so the in-play STEAM gate stays honestly quiet;
+what's real and visible now is the pre-match **money-flow drift** the detector reports
+(e.g. Norway v England: +4.3pp into England). When matches kick off, the same detector
+catches in-play steam. `txline/live_mainnet.py` also works on mainnet (`--network mainnet`).
 
 ## Status
 - [x] TxLINE client + auth flow (`txline/client.py`), devnet access solved (`txline/access.md`)

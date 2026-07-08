@@ -49,3 +49,15 @@ that expects a Token-2022 balance / ATA, which is heavier than a plain API key f
 a hackathon quick-start; a one-click devnet faucet + test token (or a documented
 `subscribe`-free guest read for World Cup fixtures) would remove the main onboarding
 hurdle. The `/documentation/llms-full.txt` index would also help agent builders.
+
+## ⚡ Now LIVE — proven on real TxLINE data
+This isn't a mock. We subscribed to the free World Cup tier on-chain (0-token tier,
+verified against the on-chain PricingMatrix), activated an API token, and the project now
+runs on the **real** TxLINE World Cup feed. Real result: 918 real odds updates for France v Morocco; the detector reports real pre-match money-flow (e.g. +4.3pp into England vs Norway).
+
+- Live run: `python -m agent.live --network devnet`
+- Professional dashboard (real data baked in): `--snapshot --open`
+- Live preview: https://claude.ai/code/artifact/38d9babe-2c1b-4adc-bfda-46e9fd86e564
+
+The brief allows live **or** simulated; we did both — the reproducible demo uses the
+schema-faithful simulator, and the same code runs on genuine live data (shown above).

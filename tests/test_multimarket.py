@@ -62,3 +62,21 @@ if __name__ == "__main__":
     test_confirmed_beats_unconfirmed()
     test_dashboard_builds_self_contained()
     print("all multimarket tests passed ✓")
+
+
+def test_prodash_builds_from_snapshot(tmp_path=None):
+    import json
+    from pathlib import Path
+    from agent import prodash
+    snap = {"source": "test", "fixtures": [{"home": "A", "away": "B", "updates": 100,
+            "home_curve": [0.5, 0.52], "draw_curve": [0.3, 0.29], "away_curve": [0.2, 0.19],
+            "open": {"1": .5, "X": .3, "2": .2}, "now": {"1": .52, "X": .29, "2": .19},
+            "drift": {"1": 2.0, "X": -1.0, "2": -1.0}, "into": "1"}],
+            "backtest": {"confirmed": {"hit_rate": .86, "ci95": [.83, .88], "avg_clv_pct": 13.3,
+                         "roi_per_signal": .8, "beat_close_rate": .8},
+                         "unconfirmed": {"hit_rate": .6, "ci95": [.56, .65], "avg_clv_pct": 3.6,
+                         "roi_per_signal": .27, "beat_close_rate": .66}}}
+    prodash._SNAP.write_text(json.dumps(snap))
+    html = prodash.build().read_text()
+    assert "/*__DATA__*/" not in html and '"fixtures"' in html
+    assert "https://" not in html.replace("http://www.w3.org", "")
