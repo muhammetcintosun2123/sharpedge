@@ -124,15 +124,33 @@ def subscribe_ix(user: Pubkey, service_level_id: int, weeks: int) -> Instruction
     return Instruction(PROGRAM, data, subscribe_accounts(user))
 
 
+def create_ata_idempotent_ix(payer: Pubkey, owner: Pubkey, mint: Pubkey) -> Instruction:
+    """Associated Token program CreateIdempotent (data=[1]) — makes the owner's ATA if
+    it doesn't exist. The subscribe ix requires user_token_account to already exist."""
+    account = ata(owner, mint)
+    accts = [
+        AccountMeta(payer, True, True),
+        AccountMeta(account, False, True),
+        AccountMeta(owner, False, False),
+        AccountMeta(mint, False, False),
+        AccountMeta(SYSTEM, False, False),
+        AccountMeta(TOKEN_2022, False, False),
+    ]
+    return Instruction(ATA_PROG, bytes([1]), accts)
+
+
 def _blockhash() -> Hash:
     return Hash.from_string(_rpc("getLatestBlockhash", [{"commitment": "finalized"}])
                             ["result"]["value"]["blockhash"])
 
 
 def build_tx(kp: Keypair, level: int, weeks: int) -> Transaction:
-    ix = subscribe_ix(kp.pubkey(), level, weeks)
-    msg = Message.new_with_blockhash([ix], kp.pubkey(), _blockhash())
-    return Transaction([kp], msg, _blockhash())
+    # create the user's TXLINE ATA first (idempotent), then subscribe
+    ixs = [create_ata_idempotent_ix(kp.pubkey(), kp.pubkey(), TXLINE_MINT),
+           subscribe_ix(kp.pubkey(), level, weeks)]
+    bh = _blockhash()
+    msg = Message.new_with_blockhash(ixs, kp.pubkey(), bh)
+    return Transaction([kp], msg, bh)
 
 
 def simulate(level: int, weeks: int) -> dict:
@@ -162,19 +180,20 @@ def send_and_activate(level: int, weeks: int, leagues=None) -> str:
         if st and st.get("confirmationStatus") in ("confirmed", "finalized"):
             break
         time.sleep(2)
-    # activate: sign "<txSig>:<leagues_csv>:<jwt>"
+    # activate: sign "<txSig>:<leagues_csv>:<jwt>" (field name is txSig)
+    time.sleep(3)                                    # let the subscription finalize
     message = f"{txsig}:{','.join(map(str, leagues))}:{jwt}".encode()
     wallet_sig = base64.b64encode(bytes(kp.sign_message(message))).decode()
     r = httpx.post(f"{API}/api/token/activate",
-                   json={"txSignature": txsig, "walletSignature": wallet_sig, "leagues": leagues},
+                   json={"txSig": txsig, "walletSignature": wallet_sig, "leagues": leagues},
                    headers={"Authorization": f"Bearer {jwt}"}, timeout=30)
-    if r.status_code != 200:
-        # some deployments name it txSig
-        r = httpx.post(f"{API}/api/token/activate",
-                       json={"txSig": txsig, "walletSignature": wallet_sig, "leagues": leagues},
-                       headers={"Authorization": f"Bearer {jwt}"}, timeout=30)
+    print(f"activate HTTP {r.status_code}: {r.text[:200]}")
     r.raise_for_status()
-    token = r.json().get("token") or r.json().get("apiToken")
+    try:
+        body = r.json()
+        token = body.get("token") or body.get("apiToken") or body.get("apiKey")
+    except Exception:
+        token = r.headers.get("X-Api-Token") or r.text.strip()
     _TOK.write_text(json.dumps({"jwt": jwt, "api_token": token, "ts": time.time()}))
     print("activated. api token saved.")
     return token

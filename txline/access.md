@@ -42,3 +42,13 @@ Accounts (from TxODDS docs example): pricing_matrix PDA["pricing_matrix"], token
 PDA["token_treasury_v2"], user/treasury ATAs via Token-2022. Client: `txline/live_mainnet.py`.
 `--simulate` confirmed account derivations resolve to the real on-chain treasury vault.
 Blocker: fund the generated keypair with ~0.01 SOL, then `--subscribe` → activate → live reads.
+
+## LIVE DATA WORKING (devnet) — 2026-07-08 ✅
+Funded devnet keypair 2MTLjjt… with 1 SOL (free faucet). Subscribe flow SUCCEEDED:
+  create Token-2022 ATA (idempotent) + subscribe(level=1, weeks=4) in one tx → finalized.
+  activate: sign "<txSig>::<jwt>", POST /api/token/activate {txSig, walletSignature, leagues}
+  → returns api token as PLAIN TEXT: `txoracle_api_…` (not JSON). Saved to devnet_token.json.
+Reads work: GET /api/... with Authorization: Bearer <jwt> + X-Api-Token: <token>.
+Real World Cup fixtures (competition 72): France v Morocco, Spain v Belgium, Argentina v
+Switzerland, Norway v England. Odds snapshot returns 1X2 with Prices (decimal×1000) + Pct
+(demargined %). Client: `txline/live_mainnet.py --network devnet`. Same flow works on mainnet.
