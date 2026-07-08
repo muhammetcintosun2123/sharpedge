@@ -43,7 +43,7 @@ On the demo portfolio: **62% hit rate, +1.77u ROI, +1.8% avg CLV, beat the close
 pip install httpx solders base58            # + optional GROQ_API_KEY for LLM reads
 python -m agent.demo --fast                 # portfolio: 4 matches, deterministic core
 python -m agent.backtest --n 400            # cross-market edge over 400 matches (Wilson CIs)
-python serve.py                            # ⭐ LIVE streaming terminal (real odds tick live) → http://localhost:8787
+python3 serve.py                           # ⭐ LIVE streaming terminal — ZERO setup, real odds tick live → http://localhost:8787
 python -m agent.run  --sim                  # autonomous daemon on one fixture
 python -m agent.web  --open                 # self-contained visual dashboard (one HTML file)
 python -m pytest -q                         # determinism + scoring + backtest tests

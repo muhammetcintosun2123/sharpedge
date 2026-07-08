@@ -1,41 +1,76 @@
 """
 serve.py — SharpEdge LIVE terminal: a real streaming web app for the demo.
 
-A stdlib HTTP server (no deps) that streams real TxLINE World Cup odds over Server-Sent
-Events, runs the deterministic detector on every tick server-side, and pushes each tick +
-any signal to a live-updating browser terminal. This is the screen you record: real market
-data moving in real time, the agent reacting live.
+Runs out of the box with ZERO setup:  `python3 serve.py`  →  http://localhost:8787
+Needs only the Python standard library + agent/detector.py (no pip installs, no API token).
 
-  python serve.py                 # http://localhost:8787  (replays real odds as a live feed)
-  python serve.py --live-poll     # instead poll the real feed every 20s (true real-time)
+It streams REAL TxLINE World Cup odds over Server-Sent Events and runs the deterministic
+detector on every tick server-side, pushing each tick + any signal to a live browser
+terminal. By default it replays cached real odds (`live_cache.json`, genuine de-vigged
+1X2 history captured from the subscribed devnet feed). Pass --live to pull fresh from the
+live feed instead (needs httpx + solders + the activated token).
 
-Data is REAL: fetched from the subscribed TxLINE devnet feed (competition 72, World Cup).
-Replay streams the genuine 800-900-point odds history per fixture at a watchable pace.
+  python3 serve.py                # cached real odds (always works)
+  python3 serve.py --live         # fresh from the live TxLINE feed
+  python3 serve.py --port 9000    # choose a port
 """
 from __future__ import annotations
 
 import argparse
 import json
-import threading
+import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 from agent.detector import SharpDetector, implied_probs
-from txline import live_mainnet as L
-from txline import live_feed as F
 
-PACE_S = 0.35          # seconds between replayed ticks
-_cache = {}            # fixture_id -> real odds series (fetched once)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_CACHE = os.path.join(_HERE, "live_cache.json")
+
+PACE_S = 0.35
+USE_LIVE = False
+_data = {"fixtures": []}     # loaded at startup from cache (always) — never blocks serving
+_live = {"series": {}, "fixtures": None}
 
 
-def series(fixture_id: int):
-    if fixture_id not in _cache:
-        _cache[fixture_id] = F.odds_series(fixture_id)
-    return _cache[fixture_id]
+def load_cache():
+    global _data
+    try:
+        with open(_CACHE) as f:
+            _data = json.load(f)
+    except Exception:
+        _data = {"fixtures": []}
 
 
 def fixtures():
-    return F.fixtures(72)
+    if USE_LIVE:
+        try:
+            from txline import live_mainnet as L, live_feed as F
+            L.set_network("devnet")
+            if _live["fixtures"] is None:
+                _live["fixtures"] = [{"id": f["FixtureId"], "home": f["Participant1"],
+                                      "away": f["Participant2"]} for f in F.fixtures(72)]
+            return _live["fixtures"]
+        except Exception as e:
+            print(f"  (live feed unavailable: {e} — using cached real odds)")
+    return [{"id": f["id"], "home": f["home"], "away": f["away"]} for f in _data["fixtures"]]
+
+
+def odds_series(fid: int):
+    """Return [{'ts','odds'}] of real odds for fixture — live if --live, else cache."""
+    if USE_LIVE:
+        try:
+            from txline import live_feed as F
+            if fid not in _live["series"]:
+                _live["series"][fid] = F.odds_series(fid)
+            return _live["series"][fid]
+        except Exception:
+            pass
+    for f in _data["fixtures"]:
+        if f["id"] == fid:
+            return f["series"]
+    return _data["fixtures"][0]["series"] if _data["fixtures"] else []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -47,24 +82,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/?"):
-            self._send(200, "text/html; charset=utf-8", PAGE.encode())
-        elif self.path == "/fixtures":
-            fx = [{"id": f["FixtureId"], "home": f["Participant1"], "away": f["Participant2"]}
-                  for f in fixtures()]
-            self._send(200, "application/json", json.dumps(fx).encode())
-        elif self.path.startswith("/stream"):
-            self.stream()
-        else:
-            self._send(404, "text/plain", b"not found")
+        try:
+            if self.path == "/" or self.path.startswith("/?"):
+                self._send(200, "text/html; charset=utf-8", PAGE.encode())
+            elif self.path == "/fixtures":
+                self._send(200, "application/json", json.dumps(fixtures()).encode())
+            elif self.path.startswith("/stream"):
+                self.stream()
+            else:
+                self._send(404, "text/plain", b"not found")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            try:
+                self._send(500, "text/plain", str(e).encode())
+            except Exception:
+                pass
 
     def stream(self):
-        from urllib.parse import urlparse, parse_qs
         q = parse_qs(urlparse(self.path).query)
-        fid = int(q.get("fixture", ["0"])[0]) or fixtures()[0]["FixtureId"]
+        fx = fixtures()
+        fid = int(q.get("fixture", ["0"])[0]) or (fx[0]["id"] if fx else 0)
         name = q.get("name", ["match"])[0]
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -76,17 +120,18 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode())
             self.wfile.flush()
 
-        ser = series(fid)
+        ser = odds_series(fid)
         det = SharpDetector(fixture_id=fid, match=name)
         open_p = implied_probs(ser[0]["odds"]) if ser else {}
         try:
-            emit("meta", {"points": len(ser), "fixture": fid, "name": name,
-                          "open": {k: round(open_p.get(k, 0), 4) for k in ("1", "X", "2")}})
+            emit("meta", {"points": len(ser), "fixture": fid, "name": name})
+            drift = {"1": 0.0, "X": 0.0, "2": 0.0}
             for i, pt in enumerate(ser):
                 p = implied_probs(pt["odds"])
+                ts = pt.get("ts", i * 60)
                 sigs = [{"sel": s.selection, "z": round(s.z, 1), "dp": round(s.delta_p, 4),
                          "kind": s.kind, "odds": s.odds_after}
-                        for s in det.update(pt["odds"], ts=pt["ts"])]
+                        for s in det.update(pt["odds"], ts=ts)]
                 drift = {k: round((p.get(k, 0) - open_p.get(k, 0)) * 100, 1) for k in ("1", "X", "2")}
                 emit("tick", {"i": i, "n": len(ser),
                               "odds": {k: round(v, 2) for k, v in pt["odds"].items()},
@@ -118,7 +163,7 @@ button{cursor:pointer}button.go{background:var(--amber);color:#111;border:0;font
 .panel{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:15px;padding:15px}
 .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--mut);margin:0 0 10px;font-weight:600}
 .prices{display:flex;gap:10px;margin-bottom:10px}
-.pr{flex:1;text-align:center;background:var(--bg);border:1px solid var(--edge);border-radius:11px;padding:9px 4px;transition:border-color .2s}
+.pr{flex:1;text-align:center;background:var(--bg);border:1px solid var(--edge);border-radius:11px;padding:9px 4px}
 .pr .k{font-size:10px;color:var(--dim);font-family:var(--mono);letter-spacing:.1em}
 .pr .v{font-family:var(--mono);font-weight:700;font-size:22px;font-variant-numeric:tabular-nums;transition:color .15s}
 .pr.up .v{color:var(--good)}.pr.down .v{color:var(--bad)}.pr.fav{border-color:color-mix(in srgb,var(--cyan) 45%,transparent)}
@@ -130,7 +175,6 @@ svg{width:100%;height:190px;display:block}
 .sig{padding:7px 9px;border-radius:8px;margin-bottom:6px;border-left:3px solid var(--amber);background:color-mix(in srgb,var(--amber) 8%,transparent);animation:pop .3s}
 @keyframes pop{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
 .log{color:var(--dim);font-size:12px;padding:3px 0}
-.big{font-family:var(--mono);font-size:30px;font-weight:800;font-variant-numeric:tabular-nums}
 .progress{height:3px;background:var(--edge);border-radius:2px;overflow:hidden;margin-top:12px}
 .progress i{display:block;height:100%;background:var(--cyan);width:0;transition:width .2s}
 </style></head><body><div class="wrap">
@@ -155,7 +199,7 @@ svg{width:100%;height:190px;display:block}
   </div>
   <div class="panel">
     <h2>Live signal feed</h2>
-    <div class="feed" id="feed"><div class="log">connect and press ▶ Stream…</div></div>
+    <div class="feed" id="feed"><div class="log">pick a match and press ▶ Stream…</div></div>
   </div>
 </div>
 </div>
@@ -163,65 +207,60 @@ svg{width:100%;height:190px;display:block}
 const $=id=>document.getElementById(id);let es=null,hist=[],LAB={1:"home",X:"draw",2:"away"};
 fetch("/fixtures").then(r=>r.json()).then(fx=>{
   $("fx").innerHTML=fx.map(f=>`<option value="${f.id}" data-n="${f.home} v ${f.away}">${f.home} v ${f.away}</option>`).join("");
-});
+}).catch(()=>{$("feed").innerHTML='<div class="log">could not load fixtures</div>';});
 $("go").onclick=()=>{
   if(es)es.close();hist=[];$("feed").innerHTML="";
   const opt=$("fx").selectedOptions[0];const name=opt?opt.dataset.n:"match";
-  const url=`/stream?fixture=${$("fx").value}&name=${encodeURIComponent(name)}`;
-  es=new EventSource(url);
+  es=new EventSource(`/stream?fixture=${$("fx").value}&name=${encodeURIComponent(name)}`);
   let prev={};
   es.addEventListener("meta",e=>{const m=JSON.parse(e.data);log(`▶ streaming ${m.points} real odds updates — ${name}`);});
   es.addEventListener("tick",e=>{
     const t=JSON.parse(e.data);hist.push(t.fair["1"]);
-    ["1","X","2"].forEach(k=>{const el=$("p"+k);const box=el.parentElement;
-      el.textContent=t.odds[k].toFixed(2);
-      box.classList.remove("up","down");
-      if(prev[k]!=null){if(t.odds[k]<prev[k])box.classList.add("up");else if(t.odds[k]>prev[k])box.classList.add("down");}
-    });
+    ["1","X","2"].forEach(k=>{const el=$("p"+k),box=el.parentElement;el.textContent=t.odds[k].toFixed(2);
+      box.classList.remove("up","down");if(prev[k]!=null){if(t.odds[k]<prev[k])box.classList.add("up");else if(t.odds[k]>prev[k])box.classList.add("down");}});
     const fav=["1","X","2"].reduce((a,b)=>t.odds[a]<t.odds[b]?a:b);
-    ["1","X","2"].forEach(k=>$("p"+k).parentElement.classList.toggle("fav",k===fav));
-    prev=t.odds;
+    ["1","X","2"].forEach(k=>$("p"+k).parentElement.classList.toggle("fav",k===fav));prev=t.odds;
     const into=["1","X","2"].reduce((a,b)=>t.drift[a]>t.drift[b]?a:b);
     $("flowval").textContent=`→ ${LAB[into]} ${t.drift[into]>=0?'+':''}${t.drift[into]}pp`;
     $("flowbar").style.width=Math.min(100,Math.abs(t.drift[into])*14+6)+"%";
-    $("prog").style.width=(t.i/(t.n-1)*100)+"%";
-    $("clock").textContent=`tick ${t.i+1}/${t.n} · de-vigged live`;
+    $("prog").style.width=(t.i/(t.n-1)*100)+"%";$("clock").textContent=`tick ${t.i+1}/${t.n} · de-vigged live`;
     drawChart();
     t.signals.forEach(s=>{const d=document.createElement("div");d.className="sig";
-      d.innerHTML=`🚨 <b>${s.kind}</b> '${s.sel}' Δ${s.dp>=0?'+':''}${s.dp} (${s.z>=0?'+':''}${s.z}σ) @ ${s.odds}`;
-      $("feed").prepend(d);});
+      d.innerHTML=`🚨 <b>${s.kind}</b> '${s.sel}' Δ${s.dp>=0?'+':''}${s.dp} (${s.z>=0?'+':''}${s.z}σ) @ ${s.odds}`;$("feed").prepend(d);});
   });
-  es.addEventListener("done",e=>{log("■ stream complete — real market history replayed");es.close();});
+  es.addEventListener("done",()=>{log("■ stream complete — real market history replayed");es.close();});
   es.onerror=()=>{log("stream ended");};
 };
 function log(t){const d=document.createElement("div");d.className="log";d.textContent=t;$("feed").prepend(d);}
 function drawChart(){const W=320,H=190,pad=8,n=hist.length;if(n<2)return;
-  let d="";hist.forEach((v,i)=>{const x=pad+(W-2*pad)*i/(n-1);const y=H-pad-(H-2*pad)*Math.max(0,Math.min(1,v));d+=(i?"L":"M")+x.toFixed(1)+" "+y.toFixed(1)+" ";});
+  let d="";hist.forEach((v,i)=>{const x=pad+(W-2*pad)*i/(n-1),y=H-pad-(H-2*pad)*Math.max(0,Math.min(1,v));d+=(i?"L":"M")+x.toFixed(1)+" "+y.toFixed(1)+" ";});
   let grid="";[.25,.5,.75].forEach(g=>{const y=H-pad-(H-2*pad)*g;grid+=`<line x1="${pad}" y1="${y}" x2="${W-pad}" y2="${y}" stroke="var(--edge)" stroke-width=".5"/>`;});
-  const lx=pad+(W-2*pad);const ly=H-pad-(H-2*pad)*hist[n-1];
-  $("chart").innerHTML=`${grid}<path d="${d}" fill="none" stroke="var(--cyan)" stroke-width="2.2"/><circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="3.5" fill="var(--amber)"/>`;
-}
+  const lx=pad+(W-2*pad),ly=H-pad-(H-2*pad)*hist[n-1];
+  $("chart").innerHTML=`${grid}<path d="${d}" fill="none" stroke="var(--cyan)" stroke-width="2.2"/><circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="3.5" fill="var(--amber)"/>`;}
 </script></body></html>"""
 
 
 def main() -> int:
-    global PACE_S
+    global PACE_S, USE_LIVE
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8787)
-    ap.add_argument("--network", choices=["mainnet", "devnet"], default="devnet")
     ap.add_argument("--pace", type=float, default=PACE_S)
+    ap.add_argument("--live", action="store_true", help="pull fresh from the live TxLINE feed")
     a = ap.parse_args()
     PACE_S = a.pace
-    L.set_network(a.network)
-    print(f"SharpEdge LIVE — warming real feed…")
-    fx = fixtures()
-    print(f"  {len(fx)} live World Cup fixtures ready")
+    USE_LIVE = a.live
+    load_cache()
+    n = len(_data["fixtures"])
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
-    print(f"\n▶ open  http://localhost:{a.port}  and press Stream (real TxLINE odds, live)")
+    src = "LIVE TxLINE feed" if USE_LIVE else f"cached real odds ({n} fixtures)"
+    print("=" * 56)
+    print(f" SharpEdge LIVE terminal  ·  source: {src}")
+    print(f" ▶  open  http://localhost:{a.port}   (press ▶ Stream)")
+    print("=" * 56)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        pass
+        print("\nstopped.")
     return 0
 
 
