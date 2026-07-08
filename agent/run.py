@@ -24,23 +24,32 @@ from .simulator import stream
 
 
 def run_sim(match: str = "Brazil vs Argentina", fixture_id: int = 1001,
-            winning_selection: str = "2", explain_signals: bool = True) -> dict:
+            winning_selection: str = "2", explain_signals: bool = True,
+            poll_s: float = 0.0) -> dict:
+    """One fixture, start to settle. `poll_s` throttles the loop so you can watch it
+    tick in real time (0 = as fast as possible, for tests/CI)."""
     det = SharpDetector(fixture_id=fixture_id, match=match)
     tr = Tracker()
-    print(f"▶ SharpEdge live on: {match}  (fixture {fixture_id})\n")
+    closing: dict = {}
+    print(f"▶ SharpEdge daemon attached to: {match}  (fixture {fixture_id})\n")
     for snap in stream(steps=120, steam_at=(40, 85), winner=winning_selection):
+        closing = snap["odds"]                     # newest snapshot = current/closing line
         for sig in det.update(snap["odds"], ts=snap["ts"]):
             tr.record(sig)
             line = f"🚨 {sig.kind:5} {sig.match} | '{sig.selection}' Δ{sig.delta_p:+.3f} ({sig.z:+.1f}σ) @ {sig.odds_after}"
             print(line)
             if explain_signals:
                 print(f"   🧠 {explain(sig)}")
+        if poll_s:
+            time.sleep(poll_s)
     tr.save()
     print(f"\n⚽ Full time. Result: '{winning_selection}' wins. Scoring the sharp track record…\n")
-    res = tr.score(winning_selection)
+    res = tr.score(winning_selection, closing_odds=closing)
     print(f"   signals scored : {res['signals_scored']}")
     print(f"   hit rate       : {res['hit_rate']*100:.0f}%  ({res['hits']}/{res['signals_scored']})")
     print(f"   ROI            : {res['total_roi_units']:+.2f}u  ({res['roi_per_signal']:+.2f}u/signal)")
+    if res["avg_clv_pct"] is not None:
+        print(f"   avg CLV        : {res['avg_clv_pct']:+.1f}%  (beat close {res['beat_close']}/{res['clv_signals']})")
     return res
 
 

@@ -34,29 +34,38 @@ def run(use_llm: bool = True) -> None:
     for match, fid, seed, steam, winner in MATCHES:
         det = SharpDetector(fixture_id=fid, match=match)
         local = Tracker()
+        closing = {}
         print(f"\n▶ {match}")
         for snap in stream(seed=seed, steps=120, steam_at=steam, winner=winner):
+            closing = snap["odds"]            # last snapshot seen = the closing line
             for sig in det.update(snap["odds"], ts=snap["ts"]):
                 tr.record(sig); local.record(sig)
                 print(f"  🚨 {sig.kind:5} '{sig.selection}' Δ{sig.delta_p:+.3f} ({sig.z:+.1f}σ) @ {sig.odds_after}")
                 if use_llm:
                     print(f"     🧠 {explain(sig)}")
-        res = local.score(winner)
+        res = local.score(winner, closing_odds=closing)
         per_match.append((match, res))
-        print(f"  ⚽ FT '{winner}' → {res['hits']}/{res['signals_scored']} hits, {res['total_roi_units']:+.2f}u")
+        clv = f", CLV {res['avg_clv_pct']:+.1f}%" if res['avg_clv_pct'] is not None else ""
+        print(f"  ⚽ FT '{winner}' → {res['hits']}/{res['signals_scored']} hits, {res['total_roi_units']:+.2f}u{clv}")
 
     tr.save()
     # portfolio aggregate
     tot_sig = sum(r["signals_scored"] for _, r in per_match)
     tot_hit = sum(r["hits"] for _, r in per_match)
     tot_roi = sum(r["total_roi_units"] for _, r in per_match)
+    clv_vals = [r["avg_clv_pct"] for _, r in per_match if r["avg_clv_pct"] is not None]
+    tot_beat = sum(r["beat_close"] for _, r in per_match)
+    tot_clvn = sum(r["clv_signals"] for _, r in per_match)
     print("\n" + "=" * 64)
     print(" PORTFOLIO TRACK RECORD (auditable — out/signals.json)")
     print("=" * 64)
-    print(f"  matches         : {len(MATCHES)}")
-    print(f"  directional sigs: {tot_sig}")
-    print(f"  hit rate        : {(tot_hit/tot_sig*100 if tot_sig else 0):.0f}%  ({tot_hit}/{tot_sig})")
-    print(f"  total ROI       : {tot_roi:+.2f}u  ({(tot_roi/tot_sig if tot_sig else 0):+.2f}u/signal)")
+    print(f"  matches            : {len(MATCHES)}")
+    print(f"  directional sigs   : {tot_sig}")
+    print(f"  hit rate (outcome) : {(tot_hit/tot_sig*100 if tot_sig else 0):.0f}%  ({tot_hit}/{tot_sig})")
+    print(f"  total ROI          : {tot_roi:+.2f}u  ({(tot_roi/tot_sig if tot_sig else 0):+.2f}u/signal)")
+    if clv_vals:
+        print(f"  avg CLV            : {sum(clv_vals)/len(clv_vals):+.1f}%   ← beats the closing line = real edge")
+        print(f"  beat the close     : {(tot_beat/tot_clvn*100 if tot_clvn else 0):.0f}%  ({tot_beat}/{tot_clvn} signals)")
 
 
 def main() -> int:
