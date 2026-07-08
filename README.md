@@ -44,8 +44,17 @@ pip install httpx solders base58            # + optional GROQ_API_KEY for LLM re
 python -m agent.demo --fast                 # portfolio: 4 matches, deterministic core
 python -m agent.backtest --n 400            # cross-market edge over 400 matches (Wilson CIs)
 python -m agent.run  --sim                  # autonomous daemon on one fixture
+python -m agent.web  --open                 # self-contained visual dashboard (one HTML file)
 python -m pytest -q                         # determinism + scoring + backtest tests
 ```
+
+## Live TxLINE ready (verified)
+The full mainnet live-access path is built and verified in `txline/live_mainnet.py`: guest
+JWT → on-chain `subscribe` (free World Cup tier, **0 tokens** — confirmed against the
+on-chain PricingMatrix) → activate → read. A `--simulate` run confirms the subscribe
+transaction's accounts resolve to the real on-chain treasury; the only thing between the
+agent and a live mainnet feed is the tiny subscribe fee. The brief allows live **or**
+simulated data, and the schema-faithful simulator is used for the reproducible demo.
 
 ## Status
 - [x] TxLINE client + auth flow (`txline/client.py`), devnet access solved (`txline/access.md`)
