@@ -8,3 +8,5 @@ txline_tokens.json
 secrets/
 txline/mainnet_key.json
 txline/mainnet_token.json
+out/dashboard.html
+out/artifact.html

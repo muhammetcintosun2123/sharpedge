@@ -46,9 +46,19 @@ def test_confirmed_beats_unconfirmed():
     assert c["ci95"][0] > u["ci95"][1]
 
 
+def test_dashboard_builds_self_contained():
+    from agent import web
+    p = web.build()
+    html = p.read_text()
+    assert "/*__DATA__*/" not in html
+    assert '"backtest"' in html and '"sample"' in html
+    assert "http://" not in html and "https://" not in html
+
+
 if __name__ == "__main__":
     test_stream_multi_deterministic()
     test_detector_emits_confirmed_flags()
     test_wilson_ci_bounds()
     test_confirmed_beats_unconfirmed()
+    test_dashboard_builds_self_contained()
     print("all multimarket tests passed ✓")
