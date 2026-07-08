@@ -38,17 +38,41 @@ from solders.message import Message
 from solders.transaction import Transaction
 from solders.hash import Hash
 
-RPC = "https://api.mainnet-beta.solana.com"
-API = "https://txline.txodds.com"
-PROGRAM = Pubkey.from_string("9ExbZjAapQww1vfcisDmrngPinHTEfpjYRWMunJgcKaA")
-TXLINE_MINT = Pubkey.from_string("Zhw9TVKp68a1QrftncMSd6ELXKDtpVMNuMGr1jNwdeL")
 TOKEN_2022 = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
 ATA_PROG = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYSTEM = Pubkey.from_string("11111111111111111111111111111111")
 SUBSCRIBE_DISC = bytes([254, 28, 191, 138, 156, 179, 183, 53])
 
-_KEY = Path(__file__).resolve().parent / "mainnet_key.json"
-_TOK = Path(__file__).resolve().parent / "mainnet_token.json"
+# Both networks run the same free World Cup tier (service_level 1, price 0 tokens).
+_NETS = {
+    "mainnet": dict(
+        rpc="https://api.mainnet-beta.solana.com", api="https://txline.txodds.com",
+        program="9ExbZjAapQww1vfcisDmrngPinHTEfpjYRWMunJgcKaA",
+        mint="Zhw9TVKp68a1QrftncMSd6ELXKDtpVMNuMGr1jNwdeL"),
+    "devnet": dict(
+        rpc="https://api.devnet.solana.com", api="https://txline-dev.txodds.com",
+        program="6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J",
+        mint="4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG"),
+}
+_DIR = Path(__file__).resolve().parent
+_net = "mainnet"
+RPC = API = ""
+PROGRAM = TXLINE_MINT = None
+_KEY = _TOK = None
+
+
+def set_network(net: str) -> None:
+    global _net, RPC, API, PROGRAM, TXLINE_MINT, _KEY, _TOK
+    _net = net
+    c = _NETS[net]
+    RPC, API = c["rpc"], c["api"]
+    PROGRAM = Pubkey.from_string(c["program"])
+    TXLINE_MINT = Pubkey.from_string(c["mint"])
+    _KEY = _DIR / f"{net}_key.json"
+    _TOK = _DIR / f"{net}_token.json"
+
+
+set_network("mainnet")
 
 
 def _rpc(method, params):
@@ -56,7 +80,8 @@ def _rpc(method, params):
                                  "params": params}, timeout=30).json()
 
 
-def ata(owner: Pubkey, mint: Pubkey = TXLINE_MINT) -> Pubkey:
+def ata(owner: Pubkey, mint: Pubkey = None) -> Pubkey:
+    mint = mint or TXLINE_MINT
     return Pubkey.find_program_address(
         [bytes(owner), bytes(TOKEN_2022), bytes(mint)], ATA_PROG)[0]
 
@@ -171,7 +196,9 @@ def main() -> int:
     ap.add_argument("--read")
     ap.add_argument("--level", type=int, default=1)
     ap.add_argument("--weeks", type=int, default=4)
+    ap.add_argument("--network", choices=["mainnet", "devnet"], default="mainnet")
     a = ap.parse_args()
+    set_network(a.network)
 
     if a.keygen:
         kp = keygen()
