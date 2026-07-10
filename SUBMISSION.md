@@ -26,6 +26,9 @@ python3 serve.py      # → http://localhost:8787
 
 # 2. Run the Statistical Backtest (Cross-market edge, Wilson CIs)
 python -m agent.backtest --n 400
+
+# 3. Boot the Live Autonomous Agent (Detects Steam + Executes TWAP)
+python -m agent.live
 ```
 *(Requires: `pip install httpx solders`)*
 
