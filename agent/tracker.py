@@ -22,13 +22,14 @@ story: it is exactly how a trading desk validates a signal.
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Deque
 
 from .detector import Signal
 
-_LOG = Path(__file__).resolve().parent.parent / "out" / "signals.json"
+_LOG = Path(__file__).resolve().parent.parent / "out" / "signals.jsonl"
 
 
 def selection_won(result_selection: str, signal_selection: str) -> bool:
@@ -45,14 +46,21 @@ class Scored:
 
 @dataclass
 class Tracker:
-    signals: List[Signal] = field(default_factory=list)
+    # Bound memory to last 1000 signals to prevent OOM in 24/7 autonomous deployment
+    signals: Deque[Signal] = field(default_factory=lambda: deque(maxlen=1000))
 
     def record(self, sig: Signal) -> None:
         self.signals.append(sig)
+        self.save_single(sig) # Append to file immediately without full rewrite
+
+    def save_single(self, sig: Signal) -> None:
+        _LOG.parent.mkdir(parents=True, exist_ok=True)
+        # Use JSONL (JSON Lines) for append-only fast disk IO
+        with open(_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(sig.to_dict()) + "\n")
 
     def save(self) -> None:
-        _LOG.parent.mkdir(parents=True, exist_ok=True)
-        _LOG.write_text(json.dumps([s.to_dict() for s in self.signals], indent=1))
+        pass # Deprecated in favor of save_single append-only IO
 
     def score(self, winning_selection: str,
               closing_odds: Optional[Dict[str, float]] = None) -> dict:
