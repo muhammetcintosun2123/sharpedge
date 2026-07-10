@@ -15,6 +15,30 @@ import random
 from datetime import datetime
 from typing import List, Dict
 
+class RiskManager:
+    def __init__(self, starting_bankroll: float = 1_000_000):
+        self.bankroll = starting_bankroll
+        
+    def calculate_kelly_stake(self, fair_prob: float, offered_odds: float, kelly_fraction: float = 0.25) -> float:
+        """
+        Calculates optimal order size using the Kelly Criterion.
+        f* = (p * b - 1) / (b - 1) | p: true probability, b: decimal odds.
+        """
+        if offered_odds <= 1.0 or fair_prob <= 0 or fair_prob >= 1: return 0.0
+            
+        edge = (fair_prob * offered_odds) - 1.0
+        if edge <= 0: return 0.0 # Strict discipline: No edge, no trade.
+            
+        kelly_pct = edge / (offered_odds - 1.0)
+        
+        # Institutional standard: 'Quarter Kelly' to manage variance/drawdown
+        fractional_kelly = kelly_pct * kelly_fraction
+        
+        # Cap absolute maximum exposure per trade to 5% of total AUM
+        safe_pct = min(max(fractional_kelly, 0.0), 0.05)
+        
+        return round(self.bankroll * safe_pct, 2)
+
 class TWAPEngine:
     def __init__(self, fixture_id: int, target_side: str, total_stake: float, duration_minutes: int):
         self.fixture_id = fixture_id
@@ -64,12 +88,25 @@ class TWAPEngine:
 def demo_execution():
     """Demonstrate the execution engine for the judges."""
     print("\n==================================================================")
-    print(" 🏦 SharpEdge Institutional Execution Desk (TWAP Engine)")
+    print(" 🏦 SharpEdge Institutional Execution Desk (Risk + TWAP)")
     print("==================================================================")
-    print("Scenario: Steam detected on Norway. Parent Order: $50,000 to buy Norway.")
-    print("Goal: Execute without causing slippage on the TxLINE orderbook.\n")
+    print("Scenario: Steam detected on Norway.")
     
-    algo = TWAPEngine(fixture_id=123, target_side="Norway", total_stake=50000, duration_minutes=10)
+    # 1. Evaluate Risk using Kelly Criterion
+    rm = RiskManager(starting_bankroll=1_000_000) # $1M AUM
+    fair_prob = 0.35 # We know Norway has a 35% chance
+    offered_odds = 3.80 # The market is offering 3.80 (implied 26.3%)
+    
+    optimal_stake = rm.calculate_kelly_stake(fair_prob, offered_odds)
+    print(f"\n[RISK MGR] Bankroll: ${rm.bankroll:,.2f} | Fair: {fair_prob*100}% | Odds: {offered_odds}")
+    print(f"[RISK MGR] Quarter-Kelly Optimal Execution Size: ${optimal_stake:,.2f}\n")
+    
+    if optimal_stake <= 0:
+        print("No mathematical edge. Trade aborted.")
+        return
+        
+    print("Goal: Execute optimal stake without causing slippage on the TxLINE orderbook.\n")
+    algo = TWAPEngine(fixture_id=123, target_side="Norway", total_stake=optimal_stake, duration_minutes=10)
     
     # Simulate changing odds over the 10 minute window
     simulated_odds_feed = [3.80, 3.75, 3.70, 3.72, 3.65] 
