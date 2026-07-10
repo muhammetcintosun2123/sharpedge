@@ -29,12 +29,8 @@ python -m agent.backtest --n 400
 ```
 *(Requires: `pip install httpx solders`)*
 
-## 🏆 The Differentiator: It's an Integrated Suite
-SharpEdge is not a standalone demo — it is the intelligence layer of the **TxLINE Suite**:
-- **SharpEdge** detects the sharp money steam.
-- **TrustSettle** takes that signal and automatically opens a real on-chain prediction market.
-- **PitchSide** announces the market and the pre-move to fans on Telegram.
-This pipeline is fully autonomous and proven to work with live data.
+## 🏆 The Differentiator: Institutional Execution (TWAP)
+Detecting a signal is easy; executing it without destroying the odds is hard. SharpEdge includes `agent/execution.py`, a simulated **TWAP (Time-Weighted Average Price) Algorithmic Execution Engine**. When the agent decides to place a large $50,000 order, it autonomously slices it into jittered child orders and trickles them into the TxLINE orderbook to minimize Market Impact. We aren't just predicting the market, we are trading it like a Wall Street desk.
 
 ## TxLINE Feedback (required field)
 Liked: the single normalised JSON schema across competitions and the on-chain anchoring — being able to derive the program IDL directly from chain (`getAccountInfo` on the Anchor IDL PDA) made integration fast and trustless. Friction: the free World Cup tier routes through an on-chain `subscribe` that expects a Token-2022 balance/ATA, which is heavier than a plain API key for a hackathon quick-start; a one-click devnet faucet or a documented subscribe-free guest read would remove the main onboarding hurdle.
