@@ -72,6 +72,8 @@ class _SelState:
 class SharpDetector:
     fixture_id: int
     match: str
+    z_threshold: float = Z_THRESHOLD
+    min_abs_move: float = MIN_ABS_MOVE
     _sel: Dict[str, _SelState] = field(default_factory=dict)
 
     def update(self, decimal_odds: Dict[str, float], ts: Optional[float] = None) -> List[Signal]:
@@ -87,7 +89,7 @@ class SharpDetector:
                 # or z would be capped at ~1/sqrt(alpha)). Update EWMA afterwards.
                 sigma = math.sqrt(st.ewma_var) or 1e-9
                 z = dp / sigma
-                fired = st.n >= MIN_UPDATES and abs(z) >= Z_THRESHOLD and abs(dp) >= MIN_ABS_MOVE
+                fired = st.n >= MIN_UPDATES and abs(z) >= self.z_threshold and abs(dp) >= self.min_abs_move
                 st.ewma_var = (1 - EWMA_ALPHA) * st.ewma_var + EWMA_ALPHA * (dp * dp)
                 if fired:
                     fast = (ts - st.last_ts) <= STEAM_WINDOW_S

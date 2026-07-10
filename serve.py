@@ -118,7 +118,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode())
             self.wfile.flush()
 
-        det = SharpDetector(fixture_id=fid, match=name)
+        det = SharpDetector(fixture_id=fid, match=name, z_threshold=1.5, min_abs_move=0.005)
+        
+        OUTCOMES = {
+            18209181: "1",  # France v Morocco (France 2-0)
+            18213979: "2",  # Norway v England (England 3-0)
+            18218149: "X",  # Spain v Belgium (Draw 1-1)
+            18222446: "X",  # Argentina v Switzerland (Draw 0-0)
+        }
+
         try:
             ser = odds_series(fid)          # real history (live fetch if --live, else cache)
             if not ser:
@@ -128,16 +136,64 @@ class Handler(BaseHTTPRequestHandler):
             emit("meta", {"points": len(ser), "fixture": fid, "name": name, "mode": mode})
             drift = {"1": 0.0, "X": 0.0, "2": 0.0}
 
+            balance = 10000.0
+            active_trades = []
+            trade_counter = 0
+
             def push(pt, i, n):
+                nonlocal balance, trade_counter
                 p = implied_probs(pt["odds"])
                 ts = pt.get("ts", i * 60)
-                sigs = [{"sel": s.selection, "z": round(s.z, 1), "dp": round(s.delta_p, 4),
-                         "kind": s.kind, "odds": s.odds_after} for s in det.update(pt["odds"], ts=ts)]
+                sigs = det.update(pt["odds"], ts=ts)
+                
+                # Check for new signals to buy
+                for s in sigs:
+                    if s.delta_p > 0: # buy signal (implied prob increased)
+                        # Avoid duplicates on the same selection
+                        already_bet = any(t["sel"] == s.selection for t in active_trades)
+                        if not already_bet and balance >= 200.0:
+                            trade_counter += 1
+                            trade_id = f"T-{trade_counter:03d}"
+                            balance -= 200.0
+                            active_trades.append({
+                                "id": trade_id,
+                                "sel": s.selection,
+                                "entry_odds": round(s.odds_after, 3),
+                                "entry_ts": ts,
+                                "stake": 200.0,
+                                "status": "ACTIVE",
+                                "clv": 0.0
+                            })
+                            emit("trade_placed", {
+                                "id": trade_id,
+                                "sel": s.selection,
+                                "entry_odds": round(s.odds_after, 3),
+                                "balance": round(balance, 2)
+                            })
+
+                # Update CLV edge for active trades based on current odds
+                for t in active_trades:
+                    curr_odds = pt["odds"].get(t["sel"], t["entry_odds"])
+                    if curr_odds > 0:
+                        # CLV edge = (entry_odds / curr_odds) - 1
+                        t["clv"] = round(((t["entry_odds"] / curr_odds) - 1.0) * 100, 2)
+
                 d = {k: round((p.get(k, 0) - open_p.get(k, 0)) * 100, 1) for k in ("1", "X", "2")}
-                emit("tick", {"i": i, "n": n, "ts": ts,
-                              "odds": {k: round(v, 2) for k, v in pt["odds"].items()},
-                              "fair": {k: round(p.get(k, 0), 4) for k in ("1", "X", "2")},
-                              "drift": d, "signals": sigs})
+                
+                emit("tick", {
+                    "i": i, 
+                    "n": n, 
+                    "ts": ts,
+                    "odds": {k: round(v, 2) for k, v in pt["odds"].items()},
+                    "fair": {k: round(p.get(k, 0), 4) for k in ("1", "X", "2")},
+                    "drift": d, 
+                    "signals": [{"sel": s.selection, "z": round(s.z, 1), "dp": round(s.delta_p, 4),
+                                 "kind": s.kind, "odds": s.odds_after} for s in sigs],
+                    "portfolio": {
+                        "balance": round(balance, 2),
+                        "active_trades": active_trades
+                    }
+                })
                 return d
 
             # 1) fill the screen with the recent REAL history (fast)
@@ -145,8 +201,34 @@ class Handler(BaseHTTPRequestHandler):
                 drift = push(pt, i, len(ser))
                 time.sleep(PACE_S)
 
+            # Resolve all active trades
+            outcome = OUTCOMES.get(fid)
+            resolved_events = []
+            if outcome:
+                for t in active_trades:
+                    won = (t["sel"] == outcome)
+                    pnl = 200.0 * (t["entry_odds"] - 1.0) if won else -200.0
+                    payout = 200.0 * t["entry_odds"] if won else 0.0
+                    balance += payout
+                    resolved_events.append({
+                        "id": t["id"],
+                        "sel": t["sel"],
+                        "won": won,
+                        "pnl": round(pnl, 2),
+                        "entry_odds": t["entry_odds"],
+                        "closing_odds": round(ser[-1]["odds"].get(t["sel"], t["entry_odds"]), 3),
+                        "clv": t["clv"]
+                    })
+                active_trades.clear()
+
             if not USE_LIVE:
-                emit("done", {"drift": drift})
+                emit("done", {
+                    "drift": drift,
+                    "portfolio": {
+                        "balance": round(balance, 2),
+                        "resolved": resolved_events
+                    }
+                })
                 return
 
             # 2) LIVE TAIL: keep polling the real feed; emit genuinely new updates as they land
@@ -171,24 +253,26 @@ class Handler(BaseHTTPRequestHandler):
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>SharpEdge — LIVE</title>
 <style>
-:root{--bg:#070b12;--panel:#0e1626;--panel2:#111d31;--edge:#1b2740;--fg:#e9f0fb;--mut:#7e90ad;--dim:#57677f;
---amber:#f5b13d;--cyan:#46d5ff;--good:#40d98a;--bad:#ff6060;--violet:#9a8cff;
+:root{--bg:#070b12;--panel:rgba(14,22,38,0.7);--panel2:rgba(17,29,49,0.85);--edge:#1b2740;--fg:#e9f0fb;--mut:#7e90ad;--dim:#57677f;
+--amber:#f5b13d;--cyan:#46d5ff;--good:#3fe0c8;--bad:#ff6060;--violet:#9a8cff;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,rgba(70,213,255,.06),transparent),var(--bg);color:var(--fg);font-family:var(--sans)}
-.wrap{max-width:1080px;margin:0 auto;padding:18px}
-.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 15px;background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:13px}
+.wrap{max-width:1180px;margin:0 auto;padding:18px}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 15px;background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:13px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .brand{font-weight:800;font-size:18px}.brand b{color:var(--amber)}
 .live{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--good);padding:4px 10px;border:1px solid color-mix(in srgb,var(--good) 35%,transparent);border-radius:999px}
 .live .d{width:7px;height:7px;border-radius:50%;background:var(--good);animation:pulse 1.4s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--good) 70%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
-select,button{background:var(--panel);color:var(--fg);border:1px solid var(--edge);border-radius:9px;padding:8px 12px;font-size:14px;font-family:var(--sans)}
+select,button{background:var(--bg);color:var(--fg);border:1px solid var(--edge);border-radius:9px;padding:8px 12px;font-size:14px;font-family:var(--sans);transition:all .15s}
+select:focus,button:hover{border-color:var(--cyan);outline:none}
 button{cursor:pointer}button.go{background:var(--amber);color:#111;border:0;font-weight:700}
+button.go:hover{background:#ffc25c;box-shadow:0 0 10px rgba(245,177,61,0.4)}
 .clock{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
-.grid{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;margin-top:14px}@media(max-width:820px){.grid{grid-template-columns:1fr}}
-.panel{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:15px;padding:15px}
+.grid{display:grid;grid-template-columns:1.2fr 1.2fr 1fr;gap:14px;margin-top:14px}@media(max-width:960px){.grid{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--edge);border-radius:15px;padding:15px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 8px 32px 0 rgba(0,0,0,0.25)}
 .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--mut);margin:0 0 10px;font-weight:600}
 .prices{display:flex;gap:10px;margin-bottom:10px}
-.pr{flex:1;text-align:center;background:var(--bg);border:1px solid var(--edge);border-radius:11px;padding:9px 4px}
+.pr{flex:1;text-align:center;background:var(--bg);border:1px solid var(--edge);border-radius:11px;padding:9px 4px;transition:all .15s}
 .pr .k{font-size:10px;color:var(--dim);font-family:var(--mono);letter-spacing:.1em}
 .pr .v{font-family:var(--mono);font-weight:700;font-size:22px;font-variant-numeric:tabular-nums;transition:color .15s}
 .pr.up .v{color:var(--good)}.pr.down .v{color:var(--bad)}.pr.fav{border-color:color-mix(in srgb,var(--cyan) 45%,transparent)}
@@ -196,12 +280,25 @@ svg{width:100%;height:190px;display:block}
 .flowrow{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;color:var(--mut);margin-top:8px}
 .flowbar{height:8px;border-radius:5px;background:var(--edge);overflow:hidden;margin-top:5px}
 .flowbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--amber));transition:width .3s}
-.feed{height:250px;overflow:auto;font-family:var(--mono);font-size:13px}
+.feed{height:280px;overflow:auto;font-family:var(--mono);font-size:13px}
 .sig{padding:7px 9px;border-radius:8px;margin-bottom:6px;border-left:3px solid var(--amber);background:color-mix(in srgb,var(--amber) 8%,transparent);animation:pop .3s}
 @keyframes pop{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
 .log{color:var(--dim);font-size:12px;padding:3px 0}
 .progress{height:3px;background:var(--edge);border-radius:2px;overflow:hidden;margin-top:12px}
 .progress i{display:block;height:100%;background:var(--cyan);width:0;transition:width .2s}
+
+/* Ledger styles */
+.card-grid{display:flex;gap:10px;margin-bottom:12px}
+.card{flex:1;background:var(--bg);border:1px solid var(--edge);border-radius:11px;padding:10px 6px;text-align:center;transition:border-color .15s}
+.card .lbl{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px}
+.card .val{font-family:var(--mono);font-size:18px;font-weight:800}
+.table-wrap{border:1px solid var(--edge);border-radius:10px;background:var(--bg);overflow:hidden;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{text-align:left;color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.08em;padding:6px 8px;border-bottom:1px solid var(--edge);background:rgba(25,35,55,0.2)}
+td{padding:6px 8px;border-bottom:1px solid var(--edge);font-variant-numeric:tabular-nums}
+td.m{font-family:var(--mono);color:var(--mut)}
+.c-good{color:var(--good)}.c-bad{color:var(--bad)}.c-gold{color:var(--amber)}
+.trade-row{animation:pop .3s}
 </style></head><body><div class="wrap">
 <div class="top">
   <span class="brand">Sharp<b>Edge</b></span>
@@ -212,6 +309,7 @@ svg{width:100%;height:190px;display:block}
 </div>
 <div class="grid">
   <div class="panel">
+    <h2>Live Match Odds & Fair Probabilities</h2>
     <div class="prices" id="prices">
       <div class="pr" data-k="1"><div class="k">HOME</div><div class="v" id="p1">–</div></div>
       <div class="pr" data-k="X"><div class="k">DRAW</div><div class="v" id="pX">–</div></div>
@@ -222,6 +320,39 @@ svg{width:100%;height:190px;display:block}
     <div class="flowbar"><i id="flowbar"></i></div>
     <div class="progress"><i id="prog"></i></div>
   </div>
+  
+  <div class="panel">
+    <h2>Simulated Trading Ledger</h2>
+    <div class="card-grid">
+      <div class="card"><div class="lbl">portfolio balance</div><div class="val c-gold" id="ledger-balance">$10,000.00</div></div>
+      <div class="card"><div class="lbl">session pnl</div><div class="val" id="ledger-pnl">$0.00</div></div>
+    </div>
+    
+    <h2 style="font-size:10px;margin-top:14px;margin-bottom:6px">Active Positions ($200 flat stake)</h2>
+    <div class="table-wrap" style="height:100px;overflow:auto">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>SEL</th><th>ENTRY</th><th>CLV EDGE</th></tr>
+        </thead>
+        <tbody id="active-trades-body">
+          <tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>
+        </tbody>
+      </table>
+    </div>
+    
+    <h2 style="font-size:10px;margin-bottom:6px">Completed Trades</h2>
+    <div class="table-wrap" style="height:180px;overflow:auto">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>SEL</th><th>ENTRY</th><th>CLOSE</th><th>CLV</th><th>PNL</th></tr>
+        </thead>
+        <tbody id="resolved-trades-body">
+          <tr><td colspan="6" style="text-align:center;color:var(--dim);padding:48px 0">no completed trades</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  
   <div class="panel">
     <h2>Live signal feed</h2>
     <div class="feed" id="feed"><div class="log">pick a match and press ▶ Stream…</div></div>
@@ -235,10 +366,20 @@ fetch("/fixtures").then(r=>r.json()).then(fx=>{
 }).catch(()=>{$("feed").innerHTML='<div class="log">could not load fixtures</div>';});
 $("go").onclick=()=>{
   if(es)es.close();hist=[];$("feed").innerHTML="";
+  $("ledger-balance").textContent = "$10,000.00";
+  $("ledger-balance").className = "val c-gold";
+  $("ledger-pnl").textContent = "$0.00";
+  $("ledger-pnl").className = "val";
+  $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>';
+  $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:48px 0">no completed trades</td></tr>';
   const opt=$("fx").selectedOptions[0];const name=opt?opt.dataset.n:"match";
   es=new EventSource(`/stream?fixture=${$("fx").value}&name=${encodeURIComponent(name)}`);
   let prev={};
   es.addEventListener("meta",e=>{const m=JSON.parse(e.data);log(`▶ streaming ${m.points} real odds updates — ${name}`);});
+  es.addEventListener("trade_placed",e=>{
+    const d=JSON.parse(e.data);
+    log(`💸 Agent executed trade: $200.00 stake on selection '${d.sel}' @ odds ${d.entry_odds}`);
+  });
   es.addEventListener("tick",e=>{
     const t=JSON.parse(e.data);hist.push(t.fair["1"]);
     ["1","X","2"].forEach(k=>{const el=$("p"+k),box=el.parentElement;el.textContent=t.odds[k].toFixed(2);
@@ -252,10 +393,47 @@ $("go").onclick=()=>{
     drawChart();
     t.signals.forEach(s=>{const d=document.createElement("div");d.className="sig";
       d.innerHTML=`🚨 <b>${s.kind}</b> '${s.sel}' Δ${s.dp>=0?'+':''}${s.dp} (${s.z>=0?'+':''}${s.z}σ) @ ${s.odds}`;$("feed").prepend(d);});
+    
+    // Update active positions in UI
+    const active = t.portfolio.active_trades;
+    $("ledger-balance").textContent = "$" + t.portfolio.balance.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const pnl = t.portfolio.balance - 10000.0;
+    $("ledger-pnl").textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    $("ledger-pnl").className = "val " + (pnl >= 0 ? "c-good" : "c-bad");
+    if(active.length > 0) {
+      $("active-trades-body").innerHTML = active.map(tr => {
+        const edgeCls = tr.clv >= 0 ? "c-good" : "c-bad";
+        return `<tr class="trade-row"><td class="m">${tr.id}</td><td class="m">${tr.sel}</td><td>${tr.entry_odds.toFixed(2)}</td><td class="${edgeCls} font-weight:700">${tr.clv >= 0 ? '+' : ''}${tr.clv}%</td></tr>`;
+      }).join("");
+    } else {
+      $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>';
+    }
   });
   es.addEventListener("livetail",()=>{log("🔴 now LIVE — polling the real TxLINE feed for new updates…");});
   es.addEventListener("beat",e=>{const b=JSON.parse(e.data);$("clock").textContent="🔴 LIVE · watching feed · "+new Date(b.now*1000).toLocaleTimeString();});
-  es.addEventListener("done",()=>{log("■ replay complete (cached mode — run with --live for the real-time tail)");es.close();});
+  es.addEventListener("done",e=>{
+    const d=JSON.parse(e.data);
+    log("■ replay complete (cached mode — run with --live for the real-time tail)");
+    es.close();
+    
+    $("ledger-balance").textContent = "$" + d.portfolio.balance.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const pnl = d.portfolio.balance - 10000.0;
+    $("ledger-pnl").textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    $("ledger-pnl").className = "val " + (pnl >= 0 ? "c-good" : "c-bad");
+    $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>';
+    
+    const resolved = d.portfolio.resolved;
+    if(resolved.length > 0) {
+      $("resolved-trades-body").innerHTML = resolved.map(tr => {
+        const pnlCls = tr.pnl >= 0 ? "c-good" : "c-bad";
+        const edgeCls = tr.clv >= 0 ? "c-good" : "c-bad";
+        return `<tr><td class="m">${tr.id}</td><td class="m">${tr.sel}</td><td>${tr.entry_odds.toFixed(2)}</td><td>${tr.closing_odds.toFixed(2)}</td><td class="${edgeCls}">${tr.clv >= 0 ? '+' : ''}${tr.clv}%</td><td class="${pnlCls}">${tr.pnl >= 0 ? '+' : ''}$${tr.pnl.toFixed(2)}</td></tr>`;
+      }).join("");
+      log(`🏆 Replay finished. Resolved ${resolved.length} trades. Final Session PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
+    } else {
+      $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:48px 0">no completed trades</td></tr>';
+    }
+  });
   es.onerror=()=>{log("stream ended");};
 };
 function log(t){const d=document.createElement("div");d.className="log";d.textContent=t;$("feed").prepend(d);}
