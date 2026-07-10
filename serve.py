@@ -157,9 +157,10 @@ class Handler(BaseHTTPRequestHandler):
                                 offered_odds = s.odds_after
                                 fair_prob = (1.0 / offered_odds) + (0.015 * s.z) 
                                 optimal_stake = rm.calculate_kelly_stake(fair_prob, offered_odds, kelly_fraction=0.25)
+                                print(f"[DEBUG] Kelly calc: fair={fair_prob:.2f}, odds={offered_odds}, stake={optimal_stake}")
                                 if optimal_stake <= 0: optimal_stake = 75.0
                             except Exception as e:
-                                print(f"Kelly Engine Error: {e}")
+                                print(f"[DEBUG] Kelly Engine Exception: {e}")
                                 optimal_stake = 200.0
                                 fair_prob = 0.5
                                 
@@ -222,8 +223,8 @@ class Handler(BaseHTTPRequestHandler):
             if outcome:
                 for t in active_trades:
                     won = (t["sel"] == outcome)
-                    pnl = 200.0 * (t["entry_odds"] - 1.0) if won else -200.0
-                    payout = 200.0 * t["entry_odds"] if won else 0.0
+                    pnl = t["stake"] * (t["entry_odds"] - 1.0) if won else -t["stake"]
+                    payout = t["stake"] * t["entry_odds"] if won else 0.0
                     balance += payout
                     resolved_events.append({
                         "id": t["id"],
@@ -313,7 +314,8 @@ th{text-align:left;color:var(--dim);font-size:9px;text-transform:uppercase;lette
 td{padding:6px 8px;border-bottom:1px solid var(--edge);font-variant-numeric:tabular-nums}
 td.m{font-family:var(--mono);color:var(--mut)}
 .c-good{color:var(--good)}.c-bad{color:var(--bad)}.c-gold{color:var(--amber)}
-.trade-row{animation:pop .3s}
+.trade-row{background:rgba(255,255,255,0.02)}
+.trade-log{color:#fff;font-size:12px;padding:3px 0;border-left:2px solid var(--mint);padding-left:6px;margin:2px 0}
 </style></head><body><div class="wrap">
 <div class="top">
   <span class="brand">Sharp<b>Edge</b></span>
@@ -363,7 +365,7 @@ td.m{font-family:var(--mono);color:var(--mut)}
           <tr><th>ID</th><th>SEL</th><th>ENTRY</th><th>CLV EDGE</th></tr>
         </thead>
         <tbody id="active-trades-body">
-          <tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>
+          <tr><td colspan="4" style="text-align:center;color:var(--amber);padding:24px 0;font-style:italic;opacity:0.9">no active positions</td></tr>
         </tbody>
       </table>
     </div>
@@ -375,7 +377,7 @@ td.m{font-family:var(--mono);color:var(--mut)}
           <tr><th>ID</th><th>SEL</th><th>ENTRY</th><th>CLOSE</th><th>CLV</th><th>PNL</th></tr>
         </thead>
         <tbody id="resolved-trades-body">
-          <tr><td colspan="6" style="text-align:center;color:var(--dim);padding:48px 0">no completed trades</td></tr>
+          <tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">no completed trades</td></tr>
         </tbody>
       </table>
     </div>
@@ -398,15 +400,18 @@ $("go").onclick=()=>{
   $("ledger-balance").className = "val c-gold";
   $("ledger-pnl").textContent = "$0.00";
   $("ledger-pnl").className = "val";
-  $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>';
-  $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:48px 0">no completed trades</td></tr>';
+  $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--amber);padding:24px 0;font-style:italic;opacity:0.9">no active positions</td></tr>';
+  $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">no completed trades</td></tr>';
   const opt=$("fx").selectedOptions[0];const name=opt?opt.dataset.n:"match";
   es=new EventSource(`/stream?fixture=${$("fx").value}&name=${encodeURIComponent(name)}`);
   let prev={};
   es.addEventListener("meta",e=>{const m=JSON.parse(e.data);log(`▶ streaming ${m.points} real odds updates — ${name}`);});
   es.addEventListener("trade_placed",e=>{
     const d=JSON.parse(e.data);
-    log(`💸 Executed: $${d.stake.toFixed(2)} on '${d.sel}' @ ${d.entry_odds} (Edge: ${d.edge > 0 ? '+' : ''}${d.edge.toFixed(1)}%)`);
+    const logEl = document.createElement("div");
+    logEl.className = "trade-log";
+    logEl.innerHTML = `💸 Executed: <b>$${d.stake.toFixed(2)}</b> on '${d.sel}' @ ${d.entry_odds} (Edge: <span style="color:var(--good)">${d.edge > 0 ? '+' : ''}${d.edge.toFixed(1)}%</span>)`;
+    $("feed").prepend(logEl);
     $("risk-z").textContent = (d.z > 0 ? "+" : "") + d.z + "σ";
     $("risk-edge").textContent = (d.edge > 0 ? "+" : "") + d.edge.toFixed(1) + "%";
     $("risk-stake").textContent = "$" + d.stake.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
@@ -434,10 +439,10 @@ $("go").onclick=()=>{
     if(active.length > 0) {
       $("active-trades-body").innerHTML = active.map(tr => {
         const edgeCls = tr.clv >= 0 ? "c-good" : "c-bad";
-        return `<tr class="trade-row"><td class="m">${tr.id}</td><td class="m">${tr.sel}</td><td>${tr.entry_odds.toFixed(2)}</td><td class="${edgeCls} font-weight:700">${tr.clv >= 0 ? '+' : ''}${tr.clv}%</td></tr>`;
+        return `<tr class="trade-row"><td class="m">${tr.id}</td><td class="m" style="color:#fff;font-weight:bold">${tr.sel}</td><td style="color:#fff">${tr.entry_odds.toFixed(2)}</td><td class="${edgeCls}" style="font-weight:700">${tr.clv >= 0 ? '+' : ''}${tr.clv}%</td></tr>`;
       }).join("");
     } else {
-      $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>';
+      $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--amber);padding:24px 0;font-style:italic;opacity:0.9">no active positions</td></tr>';
     }
   });
   es.addEventListener("livetail",()=>{log("🔴 now LIVE — polling the real TxLINE feed for new updates…");});
@@ -451,7 +456,7 @@ $("go").onclick=()=>{
     const pnl = d.portfolio.balance - 10000.0;
     $("ledger-pnl").textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
     $("ledger-pnl").className = "val " + (pnl >= 0 ? "c-good" : "c-bad");
-    $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:24px 0">no active positions</td></tr>';
+    $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--amber);padding:24px 0;font-style:italic;opacity:0.9">no active positions</td></tr>';
     
     const resolved = d.portfolio.resolved;
     if(resolved.length > 0) {
@@ -462,7 +467,7 @@ $("go").onclick=()=>{
       }).join("");
       log(`🏆 Replay finished. Resolved ${resolved.length} trades. Final Session PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
     } else {
-      $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:48px 0">no completed trades</td></tr>';
+      $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">no completed trades</td></tr>';
     }
   });
   es.onerror=()=>{log("stream ended");};
