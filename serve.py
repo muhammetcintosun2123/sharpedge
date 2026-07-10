@@ -28,7 +28,7 @@ from agent.detector import SharpDetector, implied_probs
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CACHE = os.path.join(_HERE, "live_cache.json")
 
-PACE_S = 0.35
+PACE_S = 0.05
 USE_LIVE = False
 _data = {"fixtures": []}     # loaded at startup from cache (always) — never blocks serving
 _live = {"series": {}, "fixtures": None}
@@ -149,27 +149,40 @@ class Handler(BaseHTTPRequestHandler):
                 # Check for new signals to buy
                 for s in sigs:
                     if s.delta_p > 0: # buy signal (implied prob increased)
-                        # Avoid duplicates on the same selection
                         already_bet = any(t["sel"] == s.selection for t in active_trades)
-                        if not already_bet and balance >= 200.0:
-                            trade_counter += 1
-                            trade_id = f"T-{trade_counter:03d}"
-                            balance -= 200.0
-                            active_trades.append({
-                                "id": trade_id,
-                                "sel": s.selection,
-                                "entry_odds": round(s.odds_after, 3),
-                                "entry_ts": ts,
-                                "stake": 200.0,
-                                "status": "ACTIVE",
-                                "clv": 0.0
-                            })
-                            emit("trade_placed", {
-                                "id": trade_id,
-                                "sel": s.selection,
-                                "entry_odds": round(s.odds_after, 3),
-                                "balance": round(balance, 2)
-                            })
+                        if not already_bet and balance > 0:
+                            try:
+                                from agent.execution import RiskManager
+                                rm = RiskManager(starting_bankroll=balance)
+                                offered_odds = s.odds_after
+                                fair_prob = 1.0 / s.odds_before  # Implied prob pre-steam
+                                optimal_stake = rm.calculate_kelly_stake(fair_prob, offered_odds, kelly_fraction=0.25)
+                            except Exception:
+                                optimal_stake = 200.0
+                                fair_prob = 0.5
+                                
+                            if optimal_stake > 0 and balance >= optimal_stake:
+                                trade_counter += 1
+                                trade_id = f"T-{trade_counter:03d}"
+                                balance -= optimal_stake
+                                active_trades.append({
+                                    "id": trade_id,
+                                    "sel": s.selection,
+                                    "entry_odds": round(s.odds_after, 3),
+                                    "entry_ts": ts,
+                                    "stake": optimal_stake,
+                                    "status": "ACTIVE",
+                                    "clv": 0.0
+                                })
+                                emit("trade_placed", {
+                                    "id": trade_id,
+                                    "sel": s.selection,
+                                    "entry_odds": round(s.odds_after, 3),
+                                    "balance": round(balance, 2),
+                                    "stake": optimal_stake,
+                                    "z": round(s.z_score, 2),
+                                    "edge": round((fair_prob * offered_odds - 1.0)*100, 2)
+                                })
 
                 # Update CLV edge for active trades based on current odds
                 for t in active_trades:
@@ -328,7 +341,20 @@ td.m{font-family:var(--mono);color:var(--mut)}
       <div class="card"><div class="lbl">session pnl</div><div class="val" id="ledger-pnl">$0.00</div></div>
     </div>
     
-    <h2 style="font-size:10px;margin-top:14px;margin-bottom:6px">Active Positions ($200 flat stake)</h2>
+    <div style="margin-top:10px; padding:10px; border:1px solid var(--amber); background:rgba(245,177,61,0.05); border-radius:8px">
+      <h3 style="margin:0 0 6px; font-size:11px; color:var(--amber); text-transform:uppercase; letter-spacing:0.1em">⚡ Kelly Criterion Risk Engine</h3>
+      <div style="display:flex; justify-content:space-between; font-family:var(--mono); font-size:12px; margin-bottom:4px">
+        <span style="color:var(--mut)">Confidence Z-Score:</span> <span id="risk-z" style="color:white">—</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-family:var(--mono); font-size:12px; margin-bottom:4px">
+        <span style="color:var(--mut)">Mathematical Edge:</span> <span id="risk-edge" style="color:var(--cyan)">—</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-family:var(--mono); font-size:12px">
+        <span style="color:var(--mut)">Optimal Kelly Stake:</span> <span id="risk-stake" style="color:var(--good)">—</span>
+      </div>
+    </div>
+    
+    <h2 style="font-size:10px;margin-top:14px;margin-bottom:6px">Active Positions (Dynamic Stake)</h2>
     <div class="table-wrap" style="height:100px;overflow:auto">
       <table>
         <thead>
@@ -378,7 +404,10 @@ $("go").onclick=()=>{
   es.addEventListener("meta",e=>{const m=JSON.parse(e.data);log(`▶ streaming ${m.points} real odds updates — ${name}`);});
   es.addEventListener("trade_placed",e=>{
     const d=JSON.parse(e.data);
-    log(`💸 Agent executed trade: $200.00 stake on selection '${d.sel}' @ odds ${d.entry_odds}`);
+    log(`💸 Executed: $${d.stake.toFixed(2)} on '${d.sel}' @ ${d.entry_odds} (Edge: ${d.edge > 0 ? '+' : ''}${d.edge.toFixed(1)}%)`);
+    $("risk-z").textContent = (d.z > 0 ? "+" : "") + d.z + "σ";
+    $("risk-edge").textContent = (d.edge > 0 ? "+" : "") + d.edge.toFixed(1) + "%";
+    $("risk-stake").textContent = "$" + d.stake.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
   });
   es.addEventListener("tick",e=>{
     const t=JSON.parse(e.data);hist.push(t.fair["1"]);
