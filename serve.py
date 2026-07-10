@@ -155,9 +155,10 @@ class Handler(BaseHTTPRequestHandler):
                                 from agent.execution import RiskManager
                                 rm = RiskManager(starting_bankroll=balance)
                                 offered_odds = s.odds_after
-                                fair_prob = 1.0 / s.odds_before  # Implied prob pre-steam
+                                fair_prob = s.prob_before  # Implied prob pre-steam
                                 optimal_stake = rm.calculate_kelly_stake(fair_prob, offered_odds, kelly_fraction=0.25)
-                            except Exception:
+                            except Exception as e:
+                                print(f"Kelly Engine Error: {e}")
                                 optimal_stake = 200.0
                                 fair_prob = 0.5
                                 
@@ -180,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "entry_odds": round(s.odds_after, 3),
                                     "balance": round(balance, 2),
                                     "stake": optimal_stake,
-                                    "z": round(s.z_score, 2),
+                                    "z": round(s.z, 2),
                                     "edge": round((fair_prob * offered_odds - 1.0)*100, 2)
                                 })
 
