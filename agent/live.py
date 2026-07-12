@@ -53,6 +53,18 @@ def run_fixture(fixture_id: int, name: str) -> dict:
     if drifts[into] > 0.003:
         print(f"  💸 pre-match money flowing into {who} "
               f"({_LABEL[into]}, +{drifts[into]*100:.1f}pp de-vigged)")
+        
+        # --- TWAP EXECUTION TRIGGER ---
+        if drifts[into] > 0.02: # 2% is a solid institutional signal threshold
+            print(f"  🏦 [INSTITUTIONAL DESK] Strong signal on {who}. Triggering TWAP execution to scale into position...")
+            from .execution import TWAPEngine
+            algo = TWAPEngine(fixture_id, who, total_stake=25000, duration_minutes=10)
+            # Replay the last 5 odds updates to simulate the live execution timeline
+            for pt in series[-5:]:
+                if "odds" in pt and into in pt["odds"]:
+                    algo.execute_slice(pt["odds"][into])
+            print("  ✅ [TWAP] Execution complete. Position locked without market impact.")
+
     if n_steam:
         for s in [x for x in tr.signals if x.kind == "STEAM"][:5]:
             print(f"  🚨 STEAM '{s.selection}' Δ{s.delta_p:+.3f} ({s.z:+.1f}σ) @ {s.odds_after}")
