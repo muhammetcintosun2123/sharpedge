@@ -139,6 +139,7 @@ class Handler(BaseHTTPRequestHandler):
 
             balance = 10000.0
             active_trades = []
+            active_twaps = []
             trade_counter = 0
 
             def push(pt, i, n):
@@ -150,49 +151,73 @@ class Handler(BaseHTTPRequestHandler):
                 # Check for new signals to buy
                 for s in sigs:
                     if s.delta_p > 0: # buy signal (implied prob increased)
-                        already_bet = any(t["sel"] == s.selection for t in active_trades)
+                        already_bet = any(t["sel"] == s.selection for t in active_trades) or any(t.target_side == s.selection for t in active_twaps)
                         if not already_bet and balance > 0:
                             try:
-                                from agent.execution import RiskManager
+                                from agent.execution import RiskManager, TWAPEngine
                                 rm = RiskManager(starting_bankroll=balance)
                                 offered_odds = s.odds_after
                                 fair_prob = (1.0 / offered_odds) + (0.015 * s.z) 
                                 optimal_stake = rm.calculate_kelly_stake(fair_prob, offered_odds, kelly_fraction=0.25)
-                                print(f"[DEBUG] Kelly calc: fair={fair_prob:.2f}, odds={offered_odds}, stake={optimal_stake}")
                                 if optimal_stake <= 0: optimal_stake = 75.0
                             except Exception as e:
-                                print(f"[DEBUG] Kelly Engine Exception: {e}")
                                 optimal_stake = 200.0
                                 fair_prob = 0.5
                                 
                             if optimal_stake > 0 and balance >= optimal_stake:
-                                trade_counter += 1
-                                trade_id = f"T-{trade_counter:03d}"
-                                balance -= optimal_stake
-                                active_trades.append({
-                                    "id": trade_id,
+                                engine = TWAPEngine(fixture_id=fid, target_side=s.selection, total_stake=optimal_stake, duration_minutes=10)
+                                active_twaps.append(engine)
+                                emit("twap_initiated", {
                                     "sel": s.selection,
-                                    "entry_odds": round(s.odds_after, 3),
-                                    "entry_ts": ts,
-                                    "stake": optimal_stake,
-                                    "status": "ACTIVE",
-                                    "clv": 0.0
-                                })
-                                emit("trade_placed", {
-                                    "id": trade_id,
-                                    "sel": s.selection,
-                                    "entry_odds": round(s.odds_after, 3),
-                                    "balance": round(balance, 2),
-                                    "stake": optimal_stake,
+                                    "total_stake": optimal_stake,
                                     "z": round(s.z, 2),
                                     "edge": round((fair_prob * offered_odds - 1.0)*100, 2)
                                 })
+
+                # Execute active TWAP engines
+                completed_engines = []
+                for engine in active_twaps:
+                    curr_odds = pt["odds"].get(engine.target_side, 1.8)
+                    slice_log = engine.execute_slice(curr_odds)
+                    if slice_log:
+                        balance -= slice_log["stake"]
+                        emit("twap_slice_filled", {
+                            "sel": engine.target_side,
+                            "stake": slice_log["stake"],
+                            "filled_price": slice_log["filled_price"],
+                            "avg_price": round(engine.average_execution_price, 3),
+                            "progress": slice_log["progress"]
+                        })
+                    if engine.is_complete():
+                        completed_engines.append(engine)
+                
+                # Move completed engines to active trades
+                for engine in completed_engines:
+                    active_twaps.remove(engine)
+                    trade_counter += 1
+                    trade_id = f"T-{trade_counter:03d}"
+                    active_trades.append({
+                        "id": trade_id,
+                        "sel": engine.target_side,
+                        "entry_odds": round(engine.average_execution_price, 3),
+                        "entry_ts": ts,
+                        "stake": round(engine.executed_stake, 2),
+                        "status": "ACTIVE",
+                        "clv": 0.0
+                    })
+                    emit("trade_placed", {
+                        "id": trade_id,
+                        "sel": engine.target_side,
+                        "entry_odds": round(engine.average_execution_price, 3),
+                        "balance": round(balance, 2),
+                        "stake": round(engine.executed_stake, 2),
+                        "edge": 5.0 # default/approx
+                    })
 
                 # Update CLV edge for active trades based on current odds
                 for t in active_trades:
                     curr_odds = pt["odds"].get(t["sel"], t["entry_odds"])
                     if curr_odds > 0:
-                        # CLV edge = (entry_odds / curr_odds) - 1
                         t["clv"] = round(((t["entry_odds"] / curr_odds) - 1.0) * 100, 2)
 
                 d = {k: round((p.get(k, 0) - open_p.get(k, 0)) * 100, 1) for k in ("1", "X", "2")}
@@ -407,15 +432,35 @@ $("go").onclick=()=>{
   es=new EventSource(`/stream?fixture=${$("fx").value}&name=${encodeURIComponent(name)}`);
   let prev={};
   es.addEventListener("meta",e=>{const m=JSON.parse(e.data);log(`▶ streaming ${m.points} real odds updates — ${name}`);});
+  es.addEventListener("twap_initiated",e=>{
+    const d=JSON.parse(e.data);
+    const logEl = document.createElement("div");
+    logEl.className = "trade-log";
+    logEl.style.borderLeft = "2px solid var(--amber)";
+    logEl.style.background = "rgba(245,177,61,0.06)";
+    logEl.innerHTML = `🔪 <b>TWAP Initiated:</b> Slicing <b>$${d.total_stake.toFixed(2)}</b> buy order for '${d.sel}' over 5 ticks (Edge: ${d.edge > 0 ? '+' : ''}${d.edge.toFixed(1)}%)`;
+    $("feed").prepend(logEl);
+    $("risk-z").textContent = (d.z > 0 ? "+" : "") + d.z + "σ";
+    $("risk-edge").textContent = (d.edge > 0 ? "+" : "") + d.edge.toFixed(1) + "%";
+    $("risk-stake").textContent = "$" + d.total_stake.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  });
+  es.addEventListener("twap_slice_filled",e=>{
+    const d=JSON.parse(e.data);
+    const logEl = document.createElement("div");
+    logEl.className = "trade-log";
+    logEl.style.borderLeft = "2px solid var(--cyan)";
+    logEl.style.color = "var(--mut)";
+    logEl.style.paddingLeft = "12px";
+    logEl.innerHTML = `↳ [TWAP Fill ${d.progress}] Bought <b>$${d.stake.toFixed(2)}</b> of '${d.sel}' @ ${d.filled_price.toFixed(2)} (Avg Entry: ${d.avg_price.toFixed(3)})`;
+    $("feed").prepend(logEl);
+  });
   es.addEventListener("trade_placed",e=>{
     const d=JSON.parse(e.data);
     const logEl = document.createElement("div");
     logEl.className = "trade-log";
-    logEl.innerHTML = `💸 Executed: <b>$${d.stake.toFixed(2)}</b> on '${d.sel}' @ ${d.entry_odds} (Edge: <span style="color:var(--good)">${d.edge > 0 ? '+' : ''}${d.edge.toFixed(1)}%</span>)`;
+    logEl.style.borderLeft = "2px solid var(--good)";
+    logEl.innerHTML = `🎯 <b>TWAP Complete:</b> Executed <b>$${d.stake.toFixed(2)}</b> on '${d.sel}' (Avg entry: ${d.entry_odds})`;
     $("feed").prepend(logEl);
-    $("risk-z").textContent = (d.z > 0 ? "+" : "") + d.z + "σ";
-    $("risk-edge").textContent = (d.edge > 0 ? "+" : "") + d.edge.toFixed(1) + "%";
-    $("risk-stake").textContent = "$" + d.stake.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
   });
   es.addEventListener("tick",e=>{
     const t=JSON.parse(e.data);hist.push(t.fair["1"]);
