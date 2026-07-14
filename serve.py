@@ -118,8 +118,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode())
             self.wfile.flush()
 
-        # Hackathon Demo Magic: Lowered thresholds so every match generates some signals
-        det = SharpDetector(fixture_id=fid, match=name, z_threshold=0.8, min_abs_move=0.002)
+        det = SharpDetector(fixture_id=fid, match=name, z_threshold=1.5, min_abs_move=0.005)
         
         OUTCOMES = {
             18209181: "1",  # France v Morocco (France 2-0)
