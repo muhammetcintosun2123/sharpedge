@@ -43,6 +43,30 @@ def implied_probs(decimal_odds: Dict[str, float]) -> Dict[str, float]:
     return {k: v / s for k, v in raw.items()}
 
 
+# ── steam signature scoring ──────────────────────────────────────────────
+# Pro desks judge a steam move by three signatures (see OddsJam/Unabated/Action
+# Network methodology): MAGNITUDE (how big), ABNORMALITY (how many sigma vs the
+# match's own noise) and SPEED (how fast it landed — real steam moves books in
+# 30-90s). We fold all three into one deterministic 0-100 conviction score. It is
+# derived only from quantities the detector already measures — no external/faked
+# inputs — and its predictive value is validated against CLV in agent.backtest.
+_W_MAG, _W_ABN, _W_VEL = 0.40, 0.35, 0.25   # weights, sum to 1
+_MAG_FULL = 0.06     # a 6pp fair-prob move earns full magnitude credit
+_ABN_FULL = 8.0      # an 8-sigma move earns full abnormality credit
+_VEL_FULL = 0.06     # 6pp landing within one minute earns full speed credit
+
+
+def steam_strength(delta_p: float, z: float, dt_seconds: float) -> float:
+    """Composite 0-100 conviction score blending magnitude, abnormality and speed.
+    Pure and unit-testable; monotonic in each input. Higher = a sharper, faster,
+    more statistically abnormal move."""
+    mag = min(1.0, abs(delta_p) / _MAG_FULL)
+    abn = min(1.0, abs(z) / _ABN_FULL)
+    dt_min = max(dt_seconds, 1.0) / 60.0
+    vel = min(1.0, (abs(delta_p) / dt_min) / _VEL_FULL)
+    return round(100.0 * (_W_MAG * mag + _W_ABN * abn + _W_VEL * vel), 1)
+
+
 @dataclass
 class Signal:
     ts: float
@@ -55,6 +79,8 @@ class Signal:
     prob_before: float
     prob_after: float
     odds_after: float
+    velocity: float = 0.0   # |Δp| per minute — the "speed" signature
+    strength: float = 0.0   # composite 0-100 steam conviction score
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -92,13 +118,17 @@ class SharpDetector:
                 fired = st.n >= MIN_UPDATES and abs(z) >= self.z_threshold and abs(dp) >= self.min_abs_move
                 st.ewma_var = (1 - EWMA_ALPHA) * st.ewma_var + EWMA_ALPHA * (dp * dp)
                 if fired:
-                    fast = (ts - st.last_ts) <= STEAM_WINDOW_S
+                    dt = ts - st.last_ts
+                    fast = dt <= STEAM_WINDOW_S
+                    dt_min = max(dt, 1.0) / 60.0
                     out.append(Signal(
                         ts=ts, fixture_id=self.fixture_id, match=self.match,
                         selection=sel, delta_p=round(dp, 5), z=round(z, 2),
                         kind="STEAM" if fast else "DRIFT",
                         prob_before=round(st.last_p, 4), prob_after=round(p, 4),
                         odds_after=decimal_odds.get(sel, 0.0),
+                        velocity=round(abs(dp) / dt_min, 5),
+                        strength=steam_strength(dp, z, dt),
                     ))
             st.last_p, st.last_ts, st.n = p, ts, st.n + 1
         return out

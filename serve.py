@@ -239,7 +239,8 @@ class Handler(BaseHTTPRequestHandler):
                     "fair": {k: round(p.get(k, 0), 4) for k in ("1", "X", "2")},
                     "drift": d, 
                     "signals": [{"sel": s.selection, "z": round(s.z, 1), "dp": round(s.delta_p, 4),
-                                 "kind": s.kind, "odds": s.odds_after} for s in sigs],
+                                 "kind": s.kind, "odds": s.odds_after,
+                                 "strength": s.strength, "vel": s.velocity} for s in sigs],
                     "portfolio": {
                         "balance": round(balance, 2),
                         "active_trades": active_trades
@@ -483,7 +484,10 @@ $("go").onclick=()=>{
     $("prog").style.width=(t.i/(t.n-1)*100)+"%";$("clock").textContent=`tick ${t.i+1}/${t.n} · de-vigged live`;
     drawChart();
     t.signals.forEach(s=>{const d=document.createElement("div");d.className="sig";
-      d.innerHTML=`🚨 <b>${s.kind}</b> '${s.sel}' Δ${s.dp>=0?'+':''}${s.dp} (${s.z>=0?'+':''}${s.z}σ) @ ${s.odds}`;$("feed").prepend(d);});
+      const str=(s.strength==null?0:s.strength);
+      const sc=str>=80?'var(--good)':(str>=60?'var(--amber)':'var(--dim)');
+      const badge=`<span title="steam-strength score 0-100 (magnitude + abnormality + speed)" style="font-family:var(--mono);font-size:10px;font-weight:800;color:${sc};border:1px solid ${sc};border-radius:4px;padding:1px 5px;margin-left:6px">CONV ${str.toFixed(0)}</span>`;
+      d.innerHTML=`🚨 <b>${s.kind}</b> '${s.sel}' Δ${s.dp>=0?'+':''}${s.dp} (${s.z>=0?'+':''}${s.z}σ) @ ${s.odds}${badge}`;$("feed").prepend(d);});
     
     // Update active positions in UI
     const active = t.portfolio.active_trades;
