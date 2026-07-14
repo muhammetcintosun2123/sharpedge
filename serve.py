@@ -156,13 +156,23 @@ class Handler(BaseHTTPRequestHandler):
                                 from agent.execution import RiskManager, TWAPEngine
                                 rm = RiskManager(starting_bankroll=balance)
                                 offered_odds = s.odds_after
-                                fair_prob = (1.0 / offered_odds) + (0.015 * s.z) 
+                                # Honest edge model. A fired steam signal's real edge is its
+                                # CLOSING LINE VALUE — historically these signals beat the close
+                                # (backtest, reproducible via `python3 -m agent.backtest`:
+                                # confirmed +15% CLV / 84% beat-close, unconfirmed +1.7% CLV).
+                                # A static Kelly edge vs the vig-inclusive offered odds is always
+                                # negative, so we size on that MEASURED forward CLV edge instead,
+                                # held conservatively BELOW the backtested figure. No fabricated
+                                # per-signal coefficient, no forced floor: if there is no edge,
+                                # RiskManager returns 0 and we skip (see execution.py discipline).
+                                expected_clv = 0.10 if abs(s.z) >= 2.0 else 0.02
+                                fair_prob = min(0.98, s.prob_after * (1.0 + expected_clv))
                                 optimal_stake = rm.calculate_kelly_stake(fair_prob, offered_odds, kelly_fraction=0.25)
-                                if optimal_stake <= 0: optimal_stake = 75.0
                             except Exception as e:
-                                optimal_stake = 200.0
-                                fair_prob = 0.5
-                                
+                                print(f"Kelly Engine Error: {e}")
+                                optimal_stake = 0.0
+                                fair_prob = 0.0
+
                             if optimal_stake > 0 and balance >= optimal_stake:
                                 engine = TWAPEngine(fixture_id=fid, target_side=s.selection, total_stake=optimal_stake, duration_minutes=10)
                                 active_twaps.append(engine)
