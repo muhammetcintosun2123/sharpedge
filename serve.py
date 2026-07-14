@@ -28,6 +28,41 @@ from agent.detector import SharpDetector, implied_probs
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CACHE = os.path.join(_HERE, "live_cache.json")
 
+SCORECARD_TIER = 80.0     # steam-strength cutoff for the high-conviction tier (matches agent.backtest)
+
+
+def _clv_block(sigs, closing):
+    """CLV stats for a list of signals vs the closing (final) odds. No winner needed —
+    CLV is the desk's leading edge indicator: (odds_when_flagged - closing) / closing."""
+    clvs = []
+    for s in sigs:
+        c = closing.get(s.selection, 0.0)
+        if c and c > 0:
+            clvs.append((s.odds_after - c) / c)
+    n = len(clvs)
+    beat = sum(1 for c in clvs if c > 0)
+    return {
+        "signals": len(sigs),
+        "clv_scored": n,
+        "avg_clv_pct": round(sum(clvs) / n * 100, 2) if n else None,
+        "beat_close_rate": round(beat / n, 3) if n else None,
+    }
+
+
+def _session_scorecard(session_sigs, closing_odds):
+    """Live desk scorecard: score this session's fired signals against the closing line,
+    split by the validated steam-strength tier. Mirrors agent.backtest, computed live."""
+    strong = [s for s in session_sigs if s.strength >= SCORECARD_TIER]
+    weak = [s for s in session_sigs if s.strength < SCORECARD_TIER]
+    avg_conv = round(sum(s.strength for s in session_sigs) / len(session_sigs), 1) if session_sigs else 0.0
+    return {
+        "all": _clv_block(session_sigs, closing_odds),
+        "strong": _clv_block(strong, closing_odds),
+        "weak": _clv_block(weak, closing_odds),
+        "avg_conviction": avg_conv,
+        "tier": SCORECARD_TIER,
+    }
+
 PACE_S = 0.05
 USE_LIVE = False
 _data = {"fixtures": []}     # loaded at startup from cache (always) — never blocks serving
@@ -140,12 +175,16 @@ class Handler(BaseHTTPRequestHandler):
             active_trades = []
             active_twaps = []
             trade_counter = 0
+            session_sigs = []          # every directional signal fired this session (for the scorecard)
 
             def push(pt, i, n):
                 nonlocal balance, trade_counter
                 p = implied_probs(pt["odds"])
                 ts = pt.get("ts", i * 60)
                 sigs = det.update(pt["odds"], ts=ts)
+                for _s in sigs:
+                    if _s.delta_p > 0:
+                        session_sigs.append(_s)
                 
                 # Check for new signals to buy
                 for s in sigs:
@@ -279,7 +318,8 @@ class Handler(BaseHTTPRequestHandler):
                     "portfolio": {
                         "balance": round(balance, 2),
                         "resolved": resolved_events
-                    }
+                    },
+                    "scorecard": _session_scorecard(session_sigs, ser[-1]["odds"] if ser else {})
                 })
                 return
 
@@ -417,7 +457,11 @@ td.m{font-family:var(--mono);color:var(--mut)}
         </tbody>
       </table>
     </div>
-  </div>
+
+    <h2 style="font-size:10px;margin-top:14px;margin-bottom:6px">Desk Scorecard — signals vs the close (this session)</h2>
+    <div id="scorecard" style="padding:10px;background:#070d18;border:1px solid var(--edge);border-radius:8px;font-family:var(--mono);font-size:11px;color:var(--dim)">
+      Runs when the replay completes — scores every fired signal against the closing line, split by conviction tier.
+    </div>
   
   <div class="panel">
     <h2>Live signal feed</h2>
@@ -528,9 +572,27 @@ $("go").onclick=()=>{
     } else {
       $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">no completed trades</td></tr>';
     }
+    if(d.scorecard) renderScorecard(d.scorecard);
   });
   es.onerror=()=>{log("stream ended");};
 };
+function renderScorecard(sc){
+  const box=$("scorecard");
+  const fmtClv=b=>b.avg_clv_pct==null?'n/a':(b.avg_clv_pct>=0?'+':'')+b.avg_clv_pct.toFixed(1)+'%';
+  const fmtBeat=b=>b.beat_close_rate==null?'—':(b.beat_close_rate*100).toFixed(0)+'%';
+  const a=sc.all,s=sc.strong,w=sc.weak;
+  if(!a.signals){box.innerHTML='No directional signals fired this session.';return;}
+  const clvCls=v=>v==null?'':(v>=0?'c-good':'c-bad');
+  box.innerHTML=`
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>signals fired</span><b style="color:#fff">${a.signals}</b></div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>avg conviction</span><b style="color:#fff">${sc.avg_conviction.toFixed(0)}/100</b></div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>avg CLV vs close</span><b class="${clvCls(a.avg_clv_pct)}">${fmtClv(a)}</b></div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:10px"><span>beat the close</span><b style="color:#fff">${fmtBeat(a)}</b></div>
+    <div style="border-top:1px solid var(--edge);padding-top:8px;font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">by conviction tier (≥${sc.tier.toFixed(0)})</div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--good)">STRONG (${s.signals})</span><span>CLV <b class="${clvCls(s.avg_clv_pct)}">${fmtClv(s)}</b> · beat ${fmtBeat(s)}</span></div>
+    <div style="display:flex;justify-content:space-between"><span style="color:var(--dim)">WEAK (${w.signals})</span><span>CLV <b class="${clvCls(w.avg_clv_pct)}">${fmtClv(w)}</b> · beat ${fmtBeat(w)}</span></div>`;
+  log(`📊 Desk scorecard: ${a.signals} signals, avg CLV ${fmtClv(a)}, STRONG tier ${fmtClv(s)} vs WEAK ${fmtClv(w)}.`);
+}
 function log(t){const d=document.createElement("div");d.className="log";d.textContent=t;$("feed").prepend(d);}
 function drawChart(){const W=320,H=190,pad=8,n=hist.length;if(n<2)return;
   let d="";hist.forEach((v,i)=>{const x=pad+(W-2*pad)*i/(n-1),y=H-pad-(H-2*pad)*Math.max(0,Math.min(1,v));d+=(i?"L":"M")+x.toFixed(1)+" "+y.toFixed(1)+" ";});
