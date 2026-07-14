@@ -44,7 +44,8 @@ async def explain_async(sig: Signal) -> str:
               f"{sig.prob_before:.3f} -> {sig.prob_after:.3f} (Δ {sig.delta_p:+.3f}, "
               f"{abs(sig.z):.1f} sigma), decimal odds now {sig.odds_after}, class {sig.kind}.\n"
               f"Write one sentence (<=25 words) for a trader. Keep the direction exactly as stated.")
-    out = await llm.chat(prompt, system=_SYSTEM, temperature=0.3, max_tokens=80)
+    # Short timeout: slow/unreachable model falls back to the template instantly (never a hang).
+    out = await llm.chat(prompt, system=_SYSTEM, temperature=0.3, max_tokens=80, timeout=12)
     return (out or _template(sig)).strip()
 
 

@@ -23,7 +23,14 @@ logger = logging.getLogger("leadgen.llm")
 
 _OPENROUTER_EP = "https://openrouter.ai/api/v1/chat/completions"
 _GROQ_EP = "https://api.groq.com/openai/v1/chat/completions"
+_NVIDIA_EP = "https://integrate.api.nvidia.com/v1/chat/completions"
 _OPENROUTER_HEADERS = {"HTTP-Referer": "https://leadgen.local", "X-Title": "leadgen"}
+
+# NVIDIA NIM (OpenAI-compatible). One nvapi- key unlocks the whole catalog; free tier
+# is 40 req/min PER MODEL. Default to GLM-5.2 (flagship agentic/coding); override with
+# NVIDIA_MODEL. Multiple keys (NVIDIA_API_KEY, _2, _3) are tried in turn on rate-limit.
+_NVIDIA_DEFAULT_MODEL = "z-ai/glm-5.2"
+_ENDPOINTS = {"nvidia": _NVIDIA_EP, "openrouter": _OPENROUTER_EP, "groq": _GROQ_EP}
 
 # Serileştir: ücretsiz Groq TPM (~6000 tok/dk) limitini aşmamak için tek-tek.
 _llm_semaphore = asyncio.Semaphore(1)
@@ -36,17 +43,25 @@ _MAX_429_RETRIES = 4
 
 
 def _load_env() -> Dict[str, str]:
-    """~/leadgen/.env dosyasını oku; ortam değişkenleri override eder."""
+    """Read env from ~/leadgen/.env AND the project-root .env (later wins); real
+    environment variables override both. Keys can live in either file."""
     env: Dict[str, str] = {}
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            env[k.strip()] = v.strip().strip('"').strip("'")
-    for k in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"):
+    candidates = [
+        Path.home() / "leadgen" / ".env",                 # documented shared location
+        Path(__file__).resolve().parent.parent / ".env",  # project-root .env
+    ]
+    for env_path in candidates:
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                val = v.strip().strip('"').strip("'")
+                if val:                                    # don't let an empty key blank a set one
+                    env[k.strip()] = val
+    for k in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL",
+              "NVIDIA_API_KEY", "NVIDIA_API_KEY_2", "NVIDIA_API_KEY_3", "NVIDIA_MODEL"):
         if os.getenv(k):
             env[k] = os.environ[k]
     return env
@@ -56,7 +71,16 @@ _ENV = _load_env()
 
 
 def _providers() -> List[Tuple[str, str, str]]:
+    # Hard kill-switch (checked live): LLM_DISABLED=1 forces template mode everywhere.
+    # Tests set this so they never touch the network regardless of which keys are present.
+    if os.getenv("LLM_DISABLED"):
+        return []
     provs: List[Tuple[str, str, str]] = []
+    # NVIDIA preferred: one or more keys, each tried in turn (round-robin on rate-limit).
+    nvidia_model = _ENV.get("NVIDIA_MODEL", _NVIDIA_DEFAULT_MODEL)
+    for k in ("NVIDIA_API_KEY", "NVIDIA_API_KEY_2", "NVIDIA_API_KEY_3"):
+        if _ENV.get(k):
+            provs.append(("nvidia", _ENV[k], nvidia_model))
     if _ENV.get("GROQ_API_KEY"):
         provs.append(("groq", _ENV["GROQ_API_KEY"], "llama-3.3-70b-versatile"))
     if _ENV.get("OPENROUTER_API_KEY"):
@@ -120,7 +144,7 @@ async def chat(
 
     for name, key, default_model in provs:
         use_model = model or default_model
-        endpoint = _OPENROUTER_EP if name == "openrouter" else _GROQ_EP
+        endpoint = _ENDPOINTS.get(name, _GROQ_EP)
         extra = _OPENROUTER_HEADERS if name == "openrouter" else None
 
         for attempt in range(_MAX_429_RETRIES):
