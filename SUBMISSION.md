@@ -35,6 +35,9 @@ python -m agent.backtest --n 400
 
 # 3. Boot the Live Autonomous Agent (Detects Steam + Executes TWAP)
 python -m agent.live
+
+# 4. Conviction alert stream (the pro-tool headline) — graded steam alerts to a JSONL feed
+python -m agent.alerts --min-strength 60      # add --live for the real feed, --webhook <url> to push
 ```
 *(Requires: `pip install httpx solders`)*
 
