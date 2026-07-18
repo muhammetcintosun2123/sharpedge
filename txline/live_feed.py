@@ -71,8 +71,46 @@ def odds_series(fixture_id: int, full_match_only: bool = True) -> List[Dict]:
     return out
 
 
+def ou_series(fixture_id: int, line: str = "2.5", full_match_only: bool = True) -> List[Dict]:
+    """Time-ordered de-margined Over/Under series for one fixture — the REAL correlated
+    market the cross-market filter needs.
+
+    TxLINE publishes it as SuperOddsType `OVERUNDER_PARTICIPANT_GOALS` with the total-goals
+    line in `MarketParameters` (e.g. "line=2.5" — the classic O/U 2.5 book). Full match is
+    MarketPeriod=None; "half=1" is the 1st-half book.
+
+    Returns [{"ts", "odds": {"over", "under"}}], oldest first."""
+    raw = get(f"/api/odds/updates/{fixture_id}")
+    out: List[Dict] = []
+    for e in sorted(_consensus(raw), key=lambda x: x["Ts"]):
+        if tuple(e.get("PriceNames", [])) != ("over", "under"):
+            continue
+        if full_match_only and e.get("MarketPeriod") is not None:
+            continue
+        if e.get("MarketParameters") != f"line={line}":
+            continue
+        prices = e.get("Prices", [])
+        if len(prices) != 2:
+            continue
+        out.append({"ts": e["Ts"] / 1000.0,
+                    "odds": {"over": prices[0] / 1000.0, "under": prices[1] / 1000.0}})
+    return out
+
+
 def scores_snapshot(fixture_id: int) -> List[dict]:
     return get(f"/api/scores/snapshot/{fixture_id}")
+
+
+def kickoff_ts(fixture_id: int) -> Optional[float]:
+    """Unix seconds of the real kickoff, from the scores feed — or None if not started.
+    The closing line is the last price BEFORE this; anything after is in-running."""
+    try:
+        for r in get(f"/api/scores/snapshot/{fixture_id}"):
+            if r.get("Action") == "kickoff" and r.get("Ts"):
+                return r["Ts"] / 1000.0
+    except Exception:
+        pass
+    return None
 
 
 if __name__ == "__main__":

@@ -122,7 +122,8 @@ def main() -> int:
     a = ap.parse_args()
     res = run(a.n, a.seed, tier=a.tier)
     print("=" * 70)
-    print(f" SharpEdge backtest — {res['matches']} matches, cross-market filter")
+    print(f" SharpEdge Monte-Carlo backtest — {res['matches']} SIMULATED fixtures "
+          f"(hidden ground truth), cross-market filter")
     print("=" * 70)
     print(_fmt("CONFIRMED", res["confirmed"]))
     print(_fmt("UNCONFIRMED", res["unconfirmed"]))
@@ -140,11 +141,13 @@ def main() -> int:
     s, w = res["strong"], res["weak"]
     if s["avg_clv_pct"] is not None and w["avg_clv_pct"] is not None:
         print("-" * 70)
-        print(f"  the strength score sorts EDGE by its leading indicator: STRONG signals "
-              f"average {s['avg_clv_pct'] - w['avg_clv_pct']:+.1f} CLV points and beat the "
-              f"close {(s['beat_close_rate'] - w['beat_close_rate'])*100:+.0f} pts more often "
-              f"than WEAK. (Raw hit-rate stays ~flat — as expected: CLV, not win rate, is the "
-              f"honest edge signal.) The 0-100 score is predictive, not cosmetic.")
+        print(f"  In THIS simulation the score separates STRONG from WEAK by "
+              f"{s['avg_clv_pct'] - w['avg_clv_pct']:+.1f} CLV points.")
+        print("  ⚠ DO NOT read that as evidence. This generator *builds in* the effect it is")
+        print("    then measured for (CONFIRM_RATE), so it can only ever confirm it. Tested")
+        print("    against the real feed the conviction claim FAILED — STRONG -4.37% CLV vs")
+        print("    WEAK +3.88% over 502 real signals — so we withdrew it. The score is a")
+        print("    descriptive badge only. Real numbers: python -m agent.realbacktest")
     return 0
 
 

@@ -31,6 +31,32 @@ _CACHE = os.path.join(_HERE, "live_cache.json")
 SCORECARD_TIER = 80.0     # steam-strength cutoff for the high-conviction tier (matches agent.backtest)
 
 
+def real_outcome(fid: int):
+    """The fixture's REAL 1X2 result ("1"/"X"/"2"), or None if it isn't finalised.
+
+    Resolved from the PROVEN goal stats, not guessed: TxODDS emits a `game_finalised`
+    scores record at period 100, where stat key 1 = home goals and key 2 = away goals
+    (verified: France 2-0 Morocco → key1=2,key2=0). These are the Merkle-anchored values
+    the settlement layer validates on-chain. A fixture that hasn't been played (every
+    current World-Cup fixture is still `scheduled`) has no such record → None → positions
+    stay open on CLV. Live only (needs the feed); returns None offline."""
+    if not USE_LIVE:
+        return None
+    try:
+        from txline import live_feed as F
+        recs = F.scores_snapshot(fid)
+        fin = [r for r in recs if r.get("Action") == "game_finalised"]
+        if not fin:
+            return None
+        st = fin[-1].get("Stats") or {}
+        home, away = st.get("1"), st.get("2")
+        if home is None or away is None:
+            return None
+        return "1" if home > away else ("2" if away > home else "X")
+    except Exception:
+        return None
+
+
 def _clv_block(sigs, closing):
     """CLV stats for a list of signals vs the closing (final) odds. No winner needed —
     CLV is the desk's leading edge indicator: (odds_when_flagged - closing) / closing."""
@@ -155,12 +181,15 @@ class Handler(BaseHTTPRequestHandler):
 
         det = SharpDetector(fixture_id=fid, match=name, z_threshold=1.5, min_abs_move=0.005)
         
-        OUTCOMES = {
-            18209181: "1",  # France v Morocco (France 2-0)
-            18213979: "2",  # Norway v England (England 3-0)
-            18218149: "X",  # Spain v Belgium (Draw 1-1)
-            18222446: "X",  # Argentina v Switzerland (Draw 0-0)
-        }
+        # NOTE (honesty): there used to be a hardcoded {fixture_id -> winner} table here.
+        # It was both stale (it only covered fixtures that have since been played and
+        # dropped off the feed) and unverifiable — the scores feed's `game_finalised`
+        # Stats dict is keyed by undocumented numeric stat ids, and the scores those
+        # comments claimed do NOT reconcile with any of them. Resolving a trade against a
+        # result we cannot prove — on fixtures the feed still reports as "scheduled" —
+        # would be inventing P&L. So we don't: positions stay OPEN and we report CLV,
+        # which is measurable *before* a result exists and is this desk's real edge metric.
+        # If/when TxODDS publishes the goal stat key, resolve from the feed here.
 
         try:
             ser = odds_series(fid)          # real history (live fetch if --live, else cache)
@@ -292,8 +321,10 @@ class Handler(BaseHTTPRequestHandler):
                 drift = push(pt, i, len(ser))
                 time.sleep(PACE_S)
 
-            # Resolve all active trades
-            outcome = OUTCOMES.get(fid)
+            # Resolve trades ONLY against a real, provable result. `real_outcome` returns
+            # None for any fixture the feed hasn't settled (all of them, pre-tournament),
+            # so nothing is resolved and no P&L is invented — positions stay open on CLV.
+            outcome = real_outcome(fid)
             resolved_events = []
             if outcome:
                 for t in active_trades:
@@ -317,7 +348,12 @@ class Handler(BaseHTTPRequestHandler):
                     "drift": drift,
                     "portfolio": {
                         "balance": round(balance, 2),
-                        "resolved": resolved_events
+                        "resolved": resolved_events,
+                        # positions that never resolved (no provable result) are still OPEN —
+                        # their stake is deployed capital, not a loss. Ship them so the UI
+                        # can show the exposure instead of silently dropping it.
+                        "active_trades": active_trades,
+                        "open_exposure": round(sum(t["stake"] for t in active_trades), 2),
                     },
                     "scorecard": _session_scorecard(session_sigs, ser[-1]["odds"] if ser else {})
                 })
@@ -349,7 +385,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 --amber:#f5b13d;--cyan:#46d5ff;--good:#3fe0c8;--bad:#ff6060;--violet:#9a8cff;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,rgba(70,213,255,.06),transparent),var(--bg);color:var(--fg);font-family:var(--sans)}
-.wrap{max-width:1180px;margin:0 auto;padding:18px}
+.wrap{max-width:1720px;width:96vw;margin:0 auto;padding:18px}
 .top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 15px;background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:13px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .brand{font-weight:800;font-size:18px}.brand b{color:var(--amber)}
 .live{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--good);padding:4px 10px;border:1px solid color-mix(in srgb,var(--good) 35%,transparent);border-radius:999px}
@@ -360,7 +396,9 @@ select:focus,button:hover{border-color:var(--cyan);outline:none}
 button{cursor:pointer}button.go{background:var(--amber);color:#111;border:0;font-weight:700}
 button.go:hover{background:#ffc25c;box-shadow:0 0 10px rgba(245,177,61,0.4)}
 .clock{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim)}
-.grid{display:grid;grid-template-columns:1.2fr 1.2fr 1fr;gap:14px;margin-top:14px}@media(max-width:960px){.grid{grid-template-columns:1fr}}
+.grid{display:grid;grid-template-columns:1.05fr 1fr 1.15fr;gap:14px;margin-top:14px;align-items:start}
+@media(max-width:1280px){.grid{grid-template-columns:1fr 1fr}}
+@media(max-width:860px){.grid{grid-template-columns:1fr}}
 .panel{background:var(--panel);border:1px solid var(--edge);border-radius:15px;padding:15px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 8px 32px 0 rgba(0,0,0,0.25)}
 .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--mut);margin:0 0 10px;font-weight:600}
 .prices{display:flex;gap:10px;margin-bottom:10px}
@@ -453,18 +491,19 @@ td.m{font-family:var(--mono);color:var(--mut)}
           <tr><th>ID</th><th>SEL</th><th>ENTRY</th><th>CLOSE</th><th>CLV</th><th>PNL</th></tr>
         </thead>
         <tbody id="resolved-trades-body">
-          <tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">no completed trades</td></tr>
+          <tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">fixtures not played yet (feed: &quot;scheduled&quot;) &mdash; no P&amp;L is simulated. CLV below is the measurable edge.</td></tr>
         </tbody>
       </table>
     </div>
 
-    <h2 style="font-size:10px;margin-top:14px;margin-bottom:6px">Desk Scorecard — signals vs the close (this session)</h2>
+  </div>
+
+  <div class="panel">
+    <h2 style="font-size:10px;margin-bottom:6px">Desk Scorecard — signals vs the close (this session)</h2>
     <div id="scorecard" style="padding:10px;background:#070d18;border:1px solid var(--edge);border-radius:8px;font-family:var(--mono);font-size:11px;color:var(--dim)">
       Runs when the replay completes — scores every fired signal against the closing line, split by conviction tier.
     </div>
-  
-  <div class="panel">
-    <h2>Live signal feed</h2>
+    <h2 style="margin-top:14px">Live signal feed</h2>
     <div class="feed" id="feed"><div class="log">pick a match and press ▶ Stream…</div></div>
   </div>
 </div>
@@ -481,7 +520,7 @@ $("go").onclick=()=>{
   $("ledger-pnl").textContent = "$0.00";
   $("ledger-pnl").className = "val";
   $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--amber);padding:24px 0;font-style:italic;opacity:0.9">no active positions</td></tr>';
-  $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">no completed trades</td></tr>';
+  $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">fixtures not played yet (feed: &quot;scheduled&quot;) &mdash; no P&amp;L is simulated. CLV below is the measurable edge.</td></tr>';
   const opt=$("fx").selectedOptions[0];const name=opt?opt.dataset.n:"match";
   es=new EventSource(`/stream?fixture=${$("fx").value}&name=${encodeURIComponent(name)}`);
   let prev={};
@@ -536,9 +575,13 @@ $("go").onclick=()=>{
     // Update active positions in UI
     const active = t.portfolio.active_trades;
     $("ledger-balance").textContent = "$" + t.portfolio.balance.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    const pnl = t.portfolio.balance - 10000.0;
-    $("ledger-pnl").textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    $("ledger-pnl").className = "val " + (pnl >= 0 ? "c-good" : "c-bad");
+    // mid-stream nothing has resolved yet, so realized PnL is 0 — the drop in balance is
+    // capital deployed into open positions, not a loss. Show exposure, don't book a loss.
+    const openExp = active.reduce((a, tr) => a + (tr.stake || 0), 0);
+    $("ledger-pnl").textContent = openExp > 0
+      ? "$0.00 · $" + openExp.toFixed(2) + " open"
+      : "$0.00";
+    $("ledger-pnl").className = "val";
     if(active.length > 0) {
       $("active-trades-body").innerHTML = active.map(tr => {
         const edgeCls = tr.clv >= 0 ? "c-good" : "c-bad";
@@ -556,11 +599,23 @@ $("go").onclick=()=>{
     es.close();
     
     $("ledger-balance").textContent = "$" + d.portfolio.balance.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    const pnl = d.portfolio.balance - 10000.0;
-    $("ledger-pnl").textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    $("ledger-pnl").className = "val " + (pnl >= 0 ? "c-good" : "c-bad");
-    $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--amber);padding:24px 0;font-style:italic;opacity:0.9">no active positions</td></tr>';
-    
+    // Session PnL is REALIZED only. Capital sitting in an unresolved position is exposure,
+    // not a loss — counting it as one is what made an open $203.60 stake read as "-$203.60".
+    const realized = (d.portfolio.resolved || []).reduce((a, t) => a + t.pnl, 0);
+    const open = d.portfolio.open_exposure || 0;
+    $("ledger-pnl").textContent = (realized >= 0 ? "+" : "") + "$" + realized.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    $("ledger-pnl").className = "val " + (realized > 0 ? "c-good" : (realized < 0 ? "c-bad" : ""));
+    const openTrades = d.portfolio.active_trades || [];
+    if(openTrades.length > 0){
+      $("active-trades-body").innerHTML = openTrades.map(tr => {
+        const edgeCls = (tr.clv || 0) >= 0 ? "c-good" : "c-bad";
+        return `<tr><td class="m">${tr.id}</td><td class="m">${tr.sel}</td><td>${tr.entry_odds.toFixed(2)}</td><td class="${edgeCls}">${(tr.clv||0) >= 0 ? '+' : ''}${tr.clv||0}%</td></tr>`;
+      }).join("");
+      log(`■ ${openTrades.length} position(s) still OPEN · $${open.toFixed(2)} exposure — fixture unplayed, so no P&L is booked. Realized PnL: $${realized.toFixed(2)}.`);
+    } else {
+      $("active-trades-body").innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--amber);padding:24px 0;font-style:italic;opacity:0.9">no active positions</td></tr>';
+    }
+    const pnl = realized;
     const resolved = d.portfolio.resolved;
     if(resolved.length > 0) {
       $("resolved-trades-body").innerHTML = resolved.map(tr => {
@@ -570,7 +625,7 @@ $("go").onclick=()=>{
       }).join("");
       log(`🏆 Replay finished. Resolved ${resolved.length} trades. Final Session PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
     } else {
-      $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">no completed trades</td></tr>';
+      $("resolved-trades-body").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--amber);padding:48px 0;font-style:italic;opacity:0.9">fixtures not played yet (feed: &quot;scheduled&quot;) &mdash; no P&amp;L is simulated. CLV below is the measurable edge.</td></tr>';
     }
     if(d.scorecard) renderScorecard(d.scorecard);
   });

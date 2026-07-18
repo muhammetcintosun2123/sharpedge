@@ -51,12 +51,33 @@ The LLM **only explains** — it never decides. The detection gate is purely det
 ### Cross-Market Confirmation
 A steam move in the 1X2 market is worth far more when the correlated **Over/Under** market moves with it. SharpEdge runs its detector on both feeds and tags each signal **CONFIRMED** or **UNCONFIRMED** (`agent/multimarket.py`).
 
-**Backtest (400 matches, Wilson 95% CIs):**
+**Measured on REAL market data** — `python -m agent.realbacktest` runs the filter over **8 real
+World Cup fixtures** off the live TxLINE feed: real 1X2 consensus against the **real Over/Under
+2.5 consensus**, with CLV taken against the **real closing line** (the last price before the real
+kickoff; in-running ticks excluded — a settled full-time price is not a "close").
 
-| Signal | Hit Rate | ROI/signal | Avg CLV | Beat Close |
-|--------|----------|-----------|---------|------------|
-| **CONFIRMED** | **86% [83–88%]** | +0.81u | +13.3% | 80% |
-| UNCONFIRMED | 60% [56–65%] | +0.27u | +3.6% | 66% |
+**502 real signals:**
+
+| Signal | n | Avg CLV | Beat Close |
+|--------|---|---------|------------|
+| **CONFIRMED** (O/U agrees) | 311 | **+8.40%** | 42% [37–48%] |
+| UNCONFIRMED | 191 | **−6.04%** | 37% [31–44%] |
+
+A **+14.4 CLV-point separation on real data.** Honest bounds: the beat-close Wilson intervals
+overlap, so the *rate* of beating the close isn't separated at this sample size — the gap is
+carried by magnitude — and n=8 fixtures is small. We report both.
+
+> `python -m agent.backtest --n 400` also exists, but it is a **Monte-Carlo** over *simulated*
+> fixtures. It proves the detector can recover a signal that exists **by construction** in its
+> own generator — it is **not** evidence the signal exists in the live market. That's what
+> `realbacktest` is for.
+
+### The claim we withdrew
+We previously claimed our 0-100 **steam-strength score** sorts edge, citing that Monte-Carlo.
+**Real data refuted it**: STRONG (≥80) averages **−4.37% CLV / 39% beat-close** vs WEAK
+**+3.88% / 41%** — it sorts *backwards*, and the intervals overlap. The simulator had the effect
+baked into its generator, so it could only ever confirm it. The score stays as a descriptive
+CONV badge; we make **no predictive claim** for it.
 
 ### Why CLV Matters
 Professional desks judge a signal by **Closing Line Value**: did the odds you caught keep shortening into the close? Beating the closing line is the strongest known predictor of long-run profit. SharpEdge reports both: outcome P&L *and* CLV.
