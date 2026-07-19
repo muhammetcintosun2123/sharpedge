@@ -1,6 +1,6 @@
 # SharpEdge — Superteam Submission (Paste-Ready)
 
-**Repo:** https://github.com/F1R3NDS/sharpedge
+**Repo:** https://github.com/muhammetcintosun2123/sharpedge
 **Track:** Trading Tools and Agents · TxODDS World Cup Hackathon
 
 ## One-Liner
